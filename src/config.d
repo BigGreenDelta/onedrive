@@ -251,6 +251,7 @@ class ApplicationConfig {
 	private string applicableConfigFilePath = "";
 	// - Store the 'sync_list' file path
 	string syncListFilePath = "";
+	string pinListFilePath = "";
 	
 	// OneDrive Business Shared File handling - what directory will be used?
 	string configuredBusinessSharedFilesDirectoryName = "";
@@ -410,6 +411,10 @@ class ApplicationConfig {
 		boolValues["check_nosync"] = false;
 		// Do we wish to download only?
 		boolValues["download_only"] = false;
+		// Files On-Demand: keep online files as local placeholders until opened or pinned
+		boolValues["files_on_demand"] = false;
+		// Files On-Demand: where '--mount-on-demand' exposes the sync directory (opening a placeholder there downloads it)
+		stringValues["on_demand_mount_dir"] = "";
 		// Publish machine-readable monitor runtime status to <confdir>/monitor-status.json
 		// Enabled by default so monitor observability is available without additional configuration.
 		boolValues["monitor_status"] = true;
@@ -690,6 +695,8 @@ class ApplicationConfig {
 		resumeDownloadFilePath = buildNormalizedPath(buildPath(configDirName, "resume_download"));
 		// - What is the full path for the 'sync_list' file
 		syncListFilePath = buildNormalizedPath(buildPath(configDirName, "sync_list"));
+		// - What is the full path for the Files On-Demand 'pin_list' file ("Always keep on this device")
+		pinListFilePath = buildNormalizedPath(buildPath(configDirName, "pin_list"));
 		// - What is the full path for the 'config' - the user file to configure the application
 		userConfigFilePath = buildNormalizedPath(buildPath(configDirName, "config"));
 		// - What is the full path for the system 'config' file if it is required
@@ -1294,6 +1301,9 @@ class ApplicationConfig {
 		stringValues["auth_response"] = "";
 		stringValues["share_password"] = "";
 		stringValues["download_single_file"] = "";
+		stringValues["download_now"] = "";
+		stringValues["free_up_space"] = "";
+		boolValues["mount_on_demand"] = false;
 		boolValues["display_config"] = false;
 		boolValues["display_sync_status"] = false;
 		boolValues["display_quota"] = false;
@@ -1386,6 +1396,15 @@ class ApplicationConfig {
 				"download-file",
 					"Download a single file from Microsoft OneDrive",
 					&stringValues["download_single_file"],
+				"download-now",
+					"Files On-Demand: download the content of a placeholder file, or of every placeholder under a directory",
+					&stringValues["download_now"],
+				"free-up-space",
+					"Files On-Demand: turn an unmodified local file, or every unmodified file under a directory, back into a placeholder",
+					&stringValues["free_up_space"],
+				"mount-on-demand",
+					"Files On-Demand: mount the sync directory at 'on_demand_mount_dir', downloading placeholders when they are opened",
+					&boolValues["mount_on_demand"],
 				"dry-run",
 					"Perform a trial sync with no changes made",
 					&boolValues["dry_run"],
@@ -1810,6 +1829,9 @@ class ApplicationConfig {
 		addLogEntry("Config option 'dry_run'                       = " ~ to!string(getValueBool("dry_run")));
 		addLogEntry("Config option 'upload_only'                   = " ~ to!string(getValueBool("upload_only")));
 		addLogEntry("Config option 'download_only'                 = " ~ to!string(getValueBool("download_only")));
+		addLogEntry("Config option 'files_on_demand'               = " ~ to!string(getValueBool("files_on_demand")));
+		addLogEntry("Config option 'on_demand_mount_dir'           = " ~ getValueString("on_demand_mount_dir"));
+		addLogEntry("Files On-Demand 'pin_list' configured         = " ~ to!string(exists(pinListFilePath)));
 		addLogEntry("Config option 'local_first'                   = " ~ to!string(getValueBool("local_first")));
 		addLogEntry("Config option 'mirror_local_state'            = " ~ to!string(getValueBool("mirror_local_state")));
 		addLogEntry("Config option 'check_nosync'                  = " ~ to!string(getValueBool("check_nosync")));
@@ -2463,6 +2485,27 @@ class ApplicationConfig {
 			operationalConflictDetected = true;
 		}
 		
+		// Files On-Demand relies on Linux user extended attributes
+		if (getValueBool("files_on_demand")) {
+			version (linux) {
+			} else {
+				addLogEntry("ERROR: 'files_on_demand' is only supported on Linux");
+				operationalConflictDetected = true;
+			}
+		}
+		
+		// Files On-Demand commands are run on their own, never together with a sync
+		if (((getValueString("download_now") != "") || (getValueString("free_up_space") != "") || getValueBool("mount_on_demand")) && (getValueBool("synchronize") || getValueBool("monitor"))) {
+			addLogEntry("ERROR: --download-now, --free-up-space and --mount-on-demand cannot be used with --sync or --monitor. Run them on their own");
+			operationalConflictDetected = true;
+		}
+		
+		// Files On-Demand commands act for real; there is no trial mode for them
+		if (((getValueString("download_now") != "") || (getValueString("free_up_space") != "") || getValueBool("mount_on_demand")) && getValueBool("dry_run")) {
+			addLogEntry("ERROR: --download-now, --free-up-space and --mount-on-demand do not support --dry-run");
+			operationalConflictDetected = true;
+		}
+		
 		// --sync and --monitor cannot be used together
 		if ((getValueBool("synchronize")) && (getValueBool("monitor"))) {
 			addLogEntry("ERROR: --sync and --monitor cannot be used together. Only use one of these options, not both at the same time");
@@ -2925,6 +2968,12 @@ class ApplicationConfig {
 		
 		// --display-sync-status - Query the sync status
 		if (getValueBool("display_sync_status")) {
+			// flag that a no sync operation has been requested
+			noSyncOperation = true;
+		}
+		
+		// --download-now / --free-up-space / --mount-on-demand - Files On-Demand operations that run beside a running --monitor
+		if ((getValueString("download_now") != "") || (getValueString("free_up_space") != "") || getValueBool("mount_on_demand")) {
 			// flag that a no sync operation has been requested
 			noSyncOperation = true;
 		}

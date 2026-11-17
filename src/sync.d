@@ -39,6 +39,8 @@ import onedrive;
 import itemdb;
 import clientSideFiltering;
 import xattr;
+import ondemand;
+import curlEngine : CurlResponse;
 
 // Microsoft OneDrive item-count advisory threshold; not a Graph API hard limit.
 private enum ulong microsoftRecommendedSyncItemCount = 300_000;
@@ -694,6 +696,11 @@ class SyncEngine {
 		SysTime functionStartTime;
 		string logKey;
 		string thisFunctionName = format("%s.%s", strip(__MODULE__) , strip(getFunctionName!({})));
+
+		// Files On-Demand: load 'pin_list' before any parallel download worker can consult it
+		if (filesOnDemandActive()) {
+			loadOnDemandPinList();
+		}
 		// Only set this if we are generating performance processing times
 		if (appConfig.getValueBool("display_processing_time") && debugLogging) {
 			functionStartTime = Clock.currTime();
@@ -2785,7 +2792,7 @@ class SyncEngine {
 						// Thus this makes using the provided data via the API useless for a hash comparison test
 
 						// Test the existing database item hash against the hash on the local disk - as this is what we know was in-sync with online prior to online deletion event
-						if (!testFileHash(localPathToDelete, existingDatabaseItem)) {
+						if (!(filesOnDemandActive() && isOnDemandPlaceholder(localPathToDelete)) && !testFileHash(localPathToDelete, existingDatabaseItem)) {
 							// Current file on disk is different by hash / content. The online item
 							// was deliberately deleted, so this is the one preservation workflow
 							// where the canonical path is intentionally removed: the changed local
@@ -3733,7 +3740,9 @@ class SyncEngine {
 		// - Is not currently cached in the local database
 		// As such, we should not be doing any other checks here to determine if the JSON item is wanted .. it is
 
-		if (exists(newItemPath)) {
+		// A Files On-Demand placeholder at this path holds no local content: treat the path as empty so the
+		// item is queued and downloadFileItem() refreshes the placeholder (or downloads it when pinned)
+		if (exists(newItemPath) && !(filesOnDemandActive() && isOnDemandPlaceholder(newItemPath))) {
 			if (debugLogging) {addLogEntry("Path on local disk already exists", ["debug"]);}
 			// Issue #2209 fix - test if path is a bad symbolic link
 			if (isSymlink(newItemPath)) {
@@ -4849,6 +4858,23 @@ class SyncEngine {
 			}
 			return;
 		}
+		// Files On-Demand: when this path holds no local content and is not pinned, create or refresh
+		// a placeholder instead of downloading the content
+		if (shouldCreateOnDemandPlaceholder(newItemPath, ignoreDataPreservationCheck)) {
+			createOnDemandPlaceholderForItem(onedriveJSONItem, newItemPath, itemModifiedTime);
+			return;
+		}
+		// A pinned placeholder is replaced by a normal download: serialise with any concurrent
+		// on-demand download of the same placeholder (they share the '.partial' staging name)
+		int onDemandLockFd = -1;
+		if (filesOnDemandActive() && !dryRun && isOnDemandPlaceholder(newItemPath)) {
+			onDemandLockFd = lockOnDemandPath(newItemPath);
+			if (!isOnDemandPlaceholder(newItemPath)) {
+				// Downloaded on demand while waiting for the lock; the normal checks below handle it
+				if (debugLogging) {addLogEntry("Placeholder was downloaded on demand while waiting: " ~ newItemPath, ["debug"]);}
+			}
+		}
+		scope(exit) unlockOnDemandPath(onDemandLockFd);
 		canonicalFileExistedBeforeDownload = exists(newItemPath);
 		if (canonicalFileExistedBeforeDownload && ignoreDataPreservationCheck) {
 			// SharePoint enrichment downloads intentionally replace the file just uploaded.
@@ -5142,7 +5168,7 @@ class SyncEngine {
 						// Snapshot the canonical bytes at the commit boundary. onedrive.d performs
 						// a final recheck after this callback returns and immediately before promotion.
 						if (canonicalExistsAtCommit) {
-							canonicalHashAtCommit = computeQuickXorHash(newItemPath);
+							canonicalHashAtCommit = canonicalContentFingerprint(newItemPath);
 							if (canonicalHashAtCommit.empty) {
 								addLogEntry("ERROR: Unable to verify canonical file at download commit; refusing replacement: " ~ newItemPath, ["error", "notify"]);
 								return false;
@@ -5174,7 +5200,8 @@ class SyncEngine {
 							}
 						}
 
-						if (canonicalExistsAtCommit && !ignoreDataPreservationCheck) {
+						// A Files On-Demand placeholder holds no local content: replacing it preserves nothing
+						if (canonicalExistsAtCommit && !ignoreDataPreservationCheck && !isOnDemandPlaceholder(newItemPath)) {
 							Item commitDatabaseItem;
 							bool commitFileFoundInDB = false;
 							foreach (driveId; onlineDriveDetails.keys) {
@@ -6589,7 +6616,7 @@ class SyncEngine {
 							}
 
 							string localPathToDelete = computeItemPath(outOfSyncItem.driveId, outOfSyncItem.id);
-							if (exists(localPathToDelete) && !testFileHash(localPathToDelete, outOfSyncItem)) {
+							if (exists(localPathToDelete) && !(filesOnDemandActive() && isOnDemandPlaceholder(localPathToDelete)) && !testFileHash(localPathToDelete, outOfSyncItem)) {
 								if (verboseLogging) {
 									addLogEntry("The item no longer exists online but contains newer local data; preserving the local file as safeBackup while honouring the online deletion: " ~ localPathToDelete, ["verbose"]);
 								}
@@ -6861,6 +6888,14 @@ class SyncEngine {
 		if (localPathExistsForConsistency(localFilePath)) {
 			// Path exists locally, is this path a file?
 			if (isFile(localFilePath)) {
+				// Files On-Demand: a placeholder holds no local content, so there is nothing to compare or
+				// upload. A pinned placeholder ("Always keep on this device") gets its content now.
+				if (filesOnDemandActive() && isOnDemandPlaceholder(localFilePath)) {
+					if (!dryRun && isPathPinnedOnDemand(localFilePath)) {
+						hydratePinnedOnDemandPlaceholder(localFilePath);
+					}
+					return;
+				}
 				// Can we actually read the local file?
 				if (readLocalFile(localFilePath)){
 					// File is readable
@@ -8273,6 +8308,17 @@ class SyncEngine {
 		if (pathIsProtectedByNoSync(localFilePath)) {
 			if (verboseLogging) {addLogEntry("Skipping changed-file upload for path protected by .nosync: " ~ localFilePath, ["verbose"]);}
 			return;
+		}
+
+		// Files On-Demand backstop: a placeholder has no content to upload, and a file still holding the
+		// exact online bytes it was downloaded with on demand is not a local edit (the database is behind)
+		if (filesOnDemandActive() && (isOnDemandPlaceholder(localFilePath) || isUnmodifiedHydratedFile(localFilePath, changedItemId))) {
+			if (verboseLogging) {addLogEntry("Skipping changed-file upload for a Files On-Demand placeholder or unmodified downloaded file: " ~ localFilePath, ["verbose"]);}
+			return;
+		}
+		// From here on this file is local content: a downloaded-on-demand marker no longer applies
+		if (filesOnDemandActive()) {
+			clearHydratedMarker(localFilePath);
 		}
 
 		// Log the path that was modified
@@ -10193,6 +10239,12 @@ class SyncEngine {
 						// Was the file found in the database?
 						if (!itemFoundInDB) {
 							// File not found in database when searching all drive id's
+							// Files On-Demand: a placeholder without a database record (for example after a
+							// database rebuild) holds no content; the next online pass re-adopts it. Never upload it.
+							if (filesOnDemandActive() && isOnDemandPlaceholder(path)) {
+								if (verboseLogging) {addLogEntry("Skipping Files On-Demand placeholder not yet in the database: " ~ path, ["verbose"]);}
+								return;
+							}
 							// Do we upload the file or clean up the file?
 							if (!cleanupLocalFiles) {
 								// --download-only --cleanup-local-files not used
@@ -10391,6 +10443,11 @@ class SyncEngine {
 		// Normally we would use pathFoundInDatabase() to calculate, but we need 'databaseItem' as well if the item is in the database
 		foreach (localFilePath; changedLocalFilesToUploadToOneDrive) {
 			try {
+				// Files On-Demand: placeholder writes (create, refresh, free up space) are not local edits
+				if (filesOnDemandActive() && isOnDemandPlaceholder(localFilePath)) {
+					if (debugLogging) {addLogEntry("[M] Ignoring change to a Files On-Demand placeholder: " ~ localFilePath, ["debug"]);}
+					continue;
+				}
 				Item databaseItem;
 				bool fileFoundInDB = false;
 
@@ -10417,7 +10474,7 @@ class SyncEngine {
 					scanLocalFilesystemPathForNewDataToUpload(localFilePath);
 				} else {
 					// This is a potentially modified file, needs to be handled as such. Is the item truly modified?
-					if (!testFileHash(localFilePath, databaseItem)) {
+					if (!testFileHash(localFilePath, databaseItem) && !(filesOnDemandActive() && isUnmodifiedHydratedFile(localFilePath, databaseItem.id))) {
 						// The local file failed the hash comparison test - there is a data difference
 						// Log that the file has changed locally
 						if (verboseLogging) {addLogEntry("[M] Local file changed: " ~ localFilePath, ["verbose"]);}
@@ -11359,6 +11416,12 @@ class SyncEngine {
 		// thread starts. The local boundary always wins.
 		if (pathIsProtectedByNoSync(fileToUpload)) {
 			if (verboseLogging) {addLogEntry("Skipping new-file upload for path protected by .nosync: " ~ fileToUpload, ["verbose"]);}
+			return;
+		}
+
+		// Files On-Demand backstop: never upload a placeholder's empty content as a new file
+		if (filesOnDemandActive() && isOnDemandPlaceholder(fileToUpload)) {
+			addLogEntry("Skipping upload of a Files On-Demand placeholder with no database record: " ~ fileToUpload);
 			return;
 		}
 
@@ -12651,6 +12714,13 @@ class SyncEngine {
 			functionStartTime = Clock.currTime();
 			logKey = generateAlphanumericString();
 			displayFunctionProcessingStart(thisFunctionName, logKey);
+		}
+
+		// Files On-Demand: never delete online an item whose only copy of the content is online while
+		// a placeholder for it still exists locally under another path (moved while no --monitor was
+		// watching, or moved into an excluded path). Deleting it would lose the content.
+		if (filesOnDemandActive() && onDemandDeleteWouldLoseContent(itemToDelete, path)) {
+			return;
 		}
 
 		OneDriveApi uploadDeletedItemOneDriveApiInstance;
@@ -15774,7 +15844,7 @@ class SyncEngine {
 					continue;
 				}
 
-				if (!testFileHash(localPath, dbItem)) {
+				if (!(filesOnDemandActive() && isOnDemandPlaceholder(localPath)) && !testFileHash(localPath, dbItem)) {
 					assessment.pendingLocalItems++;
 					assessment.modifiedLocalFiles++;
 					assessment.approximateUploadSize += localSize;
@@ -19437,6 +19507,422 @@ class SyncEngine {
 	}
 
 	// Download a single file via --download-file <path/to/file>
+	// ---------------------------------------------------------------------------------
+	// Files On-Demand (see src/ondemand.d and docs/files-on-demand.md)
+	// ---------------------------------------------------------------------------------
+
+	// The 'pin_list' rules ("Always keep on this device"), loaded on first use
+	private ClientSideFiltering onDemandPinFilter;
+	private bool onDemandPinFilterLoaded = false;
+	private bool onDemandPinRulesPresent = false;
+
+	// Is Files On-Demand active for this run?
+	bool filesOnDemandActive() {
+		return appConfig.getValueBool("files_on_demand") && onDemandSupportedPlatform();
+	}
+
+	// Load 'pin_list' once. Called from initialise() so that parallel download workers only ever read it.
+	void loadOnDemandPinList() {
+		synchronized (this) {
+			if (onDemandPinFilterLoaded) {
+				return;
+			}
+			if (exists(appConfig.pinListFilePath)) {
+				// An empty or comment-only file must pin nothing (the sync_list matcher treats
+				// "no rules" as "everything included")
+				foreach (line; readText(appConfig.pinListFilePath).splitLines()) {
+					string rule = strip(line);
+					if (!rule.empty && !rule.startsWith("#") && !rule.startsWith(";")) {
+						onDemandPinRulesPresent = true;
+						break;
+					}
+				}
+				if (onDemandPinRulesPresent) {
+					onDemandPinFilter = new ClientSideFiltering(appConfig);
+					onDemandPinFilter.loadSyncList(appConfig.pinListFilePath);
+				}
+			}
+			onDemandPinFilterLoaded = true;
+		}
+	}
+
+	// Is this local path covered by 'pin_list'? Pinned files are always kept with their content.
+	bool isPathPinnedOnDemand(string localPath) {
+		if (!onDemandPinFilterLoaded) {
+			loadOnDemandPinList();
+		}
+		if (!onDemandPinRulesPresent) {
+			return false;
+		}
+		// 'pin_list' reuses the 'sync_list' matcher: 'not excluded' means 'covered by a rule'
+		return !onDemandPinFilter.isPathExcludedViaSyncList(localPath);
+	}
+
+	// Should a download of this path create (or refresh) a placeholder instead of fetching content?
+	// Only when the path holds no local content: a hydrated file stays hydrated and is updated with
+	// content, exactly like a file Windows marks "Available on this device".
+	bool shouldCreateOnDemandPlaceholder(string localPath, bool ignoreDataPreservationCheck) {
+		if (!filesOnDemandActive() || dryRun || ignoreDataPreservationCheck) {
+			return false;
+		}
+		if (isPathPinnedOnDemand(localPath)) {
+			return false;
+		}
+		return !exists(localPath) || isOnDemandPlaceholder(localPath);
+	}
+
+	// Create or refresh the placeholder for an online file item, then record the item in the database
+	// exactly as a completed download would.
+	void createOnDemandPlaceholderForItem(JSONValue onedriveJSONItem, string localPath, SysTime itemModifiedTime) {
+		PlaceholderIdentity identity;
+		identity.driveId = onedriveJSONItem["parentReference"]["driveId"].str;
+		identity.itemId = onedriveJSONItem["id"].str;
+		// Shared (remote) items are fetched from the remote drive
+		if (isItemRemote(onedriveJSONItem) && hasRemoteParentDriveId(onedriveJSONItem)) {
+			identity.driveId = onedriveJSONItem["remoteItem"]["parentReference"]["driveId"].str;
+		}
+		if (hasQuickXorHash(onedriveJSONItem)) {
+			identity.contentHash = onedriveJSONItem["file"]["hashes"]["quickXorHash"].str;
+		} else if (hasSHA256Hash(onedriveJSONItem)) {
+			identity.contentHash = onedriveJSONItem["file"]["hashes"]["sha256Hash"].str;
+		}
+		long size = hasFileSize(onedriveJSONItem) ? onedriveJSONItem["size"].integer : 0;
+
+		string error;
+		if (!writePlaceholder(localPath, size, itemModifiedTime, identity, error)) {
+			addLogEntry("ERROR: Unable to create Files On-Demand placeholder " ~ localPath ~ ": " ~ error, ["info", "notify"]);
+			if (!canFind(fileDownloadFailures, localPath)) {
+				fileDownloadFailures ~= localPath;
+			}
+			return;
+		}
+		if (verboseLogging) {addLogEntry("Files On-Demand placeholder: " ~ localPath, ["verbose"]);}
+		saveItem(onedriveJSONItem);
+		if (canFind(fileDownloadFailures, localPath)) {
+			fileDownloadFailures = fileDownloadFailures.filter!(item => item != localPath).array;
+		}
+		// The placeholder write produces local filesystem events; tell --monitor they are ours
+		notifyExpectedLocalFileDownload(localPath, false);
+	}
+
+	// Resolve a path given to '--download-now' / '--free-up-space': an absolute or relative path inside
+	// either the sync directory or 'on_demand_mount_dir'. Returns the absolute path inside the sync directory.
+	private bool resolveOnDemandRequestPath(string requestedPath, string syncDir, out string resolved) {
+		string requested = buildNormalizedPath(absolutePath(expandTilde(requestedPath)));
+		string base = buildNormalizedPath(absolutePath(expandTilde(syncDir)));
+		string mountDir = appConfig.getValueString("on_demand_mount_dir");
+		string[] roots = [base];
+		if (!mountDir.empty) {
+			roots ~= buildNormalizedPath(absolutePath(expandTilde(mountDir)));
+		}
+		foreach (root; roots) {
+			if (requested == root || requested.startsWith(root ~ "/")) {
+				resolved = buildPath(base, relativePath(requested, root));
+				resolved = buildNormalizedPath(resolved);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// '--download-now <path>' (hydrate) and '--free-up-space <path>' (dehydrate). A directory applies
+	// the action to every file below it. Runs beside a running '--monitor': it uses only the online
+	// API and the identity recorded in each placeholder, never the live database.
+	bool performOnDemandAction(string requestedPath, string syncDir, bool hydrate) {
+		if (!filesOnDemandActive()) {
+			addLogEntry("ERROR: Files On-Demand is not enabled. Set 'files_on_demand = \"true\"' in the config file (Linux only).");
+			return false;
+		}
+		string target;
+		if (!resolveOnDemandRequestPath(requestedPath, syncDir, target)) {
+			addLogEntry("ERROR: The path is not inside the sync directory or 'on_demand_mount_dir': " ~ requestedPath);
+			return false;
+		}
+		if (!exists(target)) {
+			addLogEntry("ERROR: The path does not exist: " ~ target);
+			return false;
+		}
+
+		string[] files;
+		if (isDir(target)) {
+			foreach (DirEntry entry; dirEntries(target, SpanMode.depth, false)) {
+				if (entry.isFile && !entry.isSymlink && !entry.name.endsWith(".partial")) {
+					files ~= entry.name;
+				}
+			}
+		} else {
+			files ~= target;
+		}
+
+		OneDriveApi api = new OneDriveApi(appConfig);
+		api.initialise();
+		scope(exit) {
+			api.releaseCurlEngine();
+			api = null;
+		}
+
+		string base = buildNormalizedPath(absolutePath(expandTilde(syncDir)));
+		bool allGood = true;
+		foreach (file; files) {
+			bool ok = hydrate ? hydrateOnDemandPlaceholder(api, file) : dehydrateOnDemandFile(api, file, base);
+			allGood = allGood && ok;
+		}
+		return allGood;
+	}
+
+	// Download the content of one placeholder and atomically replace the placeholder with it
+	bool hydrateOnDemandPlaceholder(OneDriveApi api, string path) {
+		if (!isOnDemandPlaceholder(path)) {
+			if (verboseLogging) {addLogEntry("Already available on this device: " ~ path, ["verbose"]);}
+			return true;
+		}
+		// One download per placeholder at a time, across processes (mount helper, --monitor, --download-now)
+		int lockFd = lockOnDemandPath(path);
+		scope(exit) unlockOnDemandPath(lockFd);
+		if (!isOnDemandPlaceholder(path)) {
+			// Another process downloaded it while this one waited for the lock
+			return true;
+		}
+		PlaceholderIdentity identity;
+		if (!readPlaceholderIdentity(path, identity)) {
+			addLogEntry("ERROR: The Files On-Demand marker of " ~ path ~ " is unreadable; cannot download it. Run a sync to refresh it.", ["info", "notify"]);
+			return false;
+		}
+
+		JSONValue onlineItem;
+		try {
+			onlineItem = api.getPathDetailsById(identity.driveId, identity.itemId);
+		} catch (OneDriveException exception) {
+			addLogEntry("ERROR: Unable to query the online file for placeholder " ~ path ~ " (HTTP " ~ to!string(exception.httpStatusCode) ~ ")", ["info", "notify"]);
+			return false;
+		}
+		if (onlineItem.type() != JSONType.object || !isFileItem(onlineItem)) {
+			addLogEntry("ERROR: The online item for placeholder " ~ path ~ " is not a file", ["info", "notify"]);
+			return false;
+		}
+		if (isMalware(onlineItem)) {
+			addLogEntry("ERROR: MALWARE DETECTED IN FILE - DOWNLOAD SKIPPED: " ~ path, ["info", "notify"]);
+			return false;
+		}
+
+		SysTime modifiedTime;
+		string modifiedTimestamp;
+		if (!getFileSystemInfoLastModifiedDateTime(onlineItem, modifiedTime, modifiedTimestamp)) {
+			addLogEntry("ERROR: The online file for placeholder " ~ path ~ " has no valid modification time", ["info", "notify"]);
+			return false;
+		}
+		long size = hasFileSize(onlineItem) ? onlineItem["size"].integer : 0;
+		string onlineQuickXor = hasQuickXorHash(onlineItem) ? onlineItem["file"]["hashes"]["quickXorHash"].str : "";
+		string onlineSha256 = hasSHA256Hash(onlineItem) ? onlineItem["file"]["hashes"]["sha256Hash"].str : "";
+		JSONValue onlineHash;
+		if (!onlineQuickXor.empty) {
+			onlineHash = JSONValue(["quickXorHash": JSONValue(onlineQuickXor)]);
+		} else if (!onlineSha256.empty) {
+			onlineHash = JSONValue(["sha256Hash": JSONValue(onlineSha256)]);
+		} else {
+			onlineHash = JSONValue(["hashMissing": JSONValue("none")]);
+		}
+
+		// Same free-space rule as a normal download
+		long freeSpace = to!long(getAvailableDiskSpace(dirName(path)));
+		if ((freeSpace < appConfig.getValueLong("space_reservation")) || (size > freeSpace)) {
+			addLogEntry("ERROR: Insufficient local disk space to download " ~ path, ["info", "notify"]);
+			return false;
+		}
+
+		string contentHash;
+		string stagingPath = path ~ ".partial";
+		int filePermissions = appConfig.returnRequiredFilePermissions();
+		bool validateDownload = !appConfig.getValueBool("disable_download_validation");
+		bool delegate(DownloadCommitInfo) inspect = (DownloadCommitInfo info) {
+			// Integrity: the downloaded bytes must be the online file
+			if (!validateDownload) {
+				contentHash = info.hasStreamedQuickXorHash ? info.streamedQuickXorHash : info.generatedQuickXorHash;
+			} else if (info.size != size) {
+				addLogEntry("ERROR: Downloaded size does not match the online file; discarding: " ~ path, ["info", "notify"]);
+				return false;
+			}
+			string downloadedQuickXor = info.hasStreamedQuickXorHash ? info.streamedQuickXorHash : info.generatedQuickXorHash;
+			if (!onlineQuickXor.empty) {
+				if (downloadedQuickXor != onlineQuickXor) {
+					addLogEntry("ERROR: Downloaded content does not match the online hash; discarding: " ~ path, ["info", "notify"]);
+					return false;
+				}
+				contentHash = onlineQuickXor;
+			} else if (!onlineSha256.empty) {
+				if (toUpper(info.generatedSHA256Hash) != toUpper(onlineSha256)) {
+					addLogEntry("ERROR: Downloaded content does not match the online hash; discarding: " ~ path, ["info", "notify"]);
+					return false;
+				}
+				contentHash = info.generatedSHA256Hash;
+			} else {
+				contentHash = downloadedQuickXor;
+			}
+			// Local intent wins: only replace the path while it is still exactly this placeholder
+			// (same item AND same version: a refresh to a newer version must not be overwritten
+			// by the older bytes this download fetched)
+			PlaceholderIdentity current;
+			if (!readPlaceholderIdentity(path, current) || current != identity) {
+				addLogEntry("WARNING: " ~ path ~ " changed locally while it was downloading; keeping the local file", ["info", "notify"]);
+				return false;
+			}
+			// Give the staged file its final state before promotion, so the path never shows the
+			// download time as its modification time (which a running --monitor could push online)
+			try {
+				setAttributes(stagingPath, filePermissions);
+				setTimes(stagingPath, modifiedTime, modifiedTime);
+			} catch (FileException exception) {
+				addLogEntry("ERROR: Unable to prepare the downloaded file " ~ stagingPath ~ ": " ~ exception.msg);
+				return false;
+			}
+			if (!contentHash.empty) {
+				markHydrated(stagingPath, identity.itemId, contentHash);
+			}
+			return true;
+		};
+
+		addLogEntry("Downloading file: " ~ path ~ " ... ", ["info"]);
+		CurlResponse response;
+		try {
+			response = api.downloadById(identity.driveId, identity.itemId, path, size, onlineHash, 0, inspect);
+		} catch (OneDriveException exception) {
+			addLogEntry("Downloading file: " ~ path ~ " ... failed! (HTTP " ~ to!string(exception.httpStatusCode) ~ ")", ["info", "notify"]);
+			return false;
+		}
+		if (response is null || isOnDemandPlaceholder(path)) {
+			addLogEntry("Downloading file: " ~ path ~ " ... failed!", ["info", "notify"]);
+			return false;
+		}
+		addLogEntry("Downloading file: " ~ path ~ " ... done", ["info"]);
+		return true;
+	}
+
+	// Before an online delete: is a placeholder for this item, or for anything below it, still present
+	// somewhere in the sync directory? Then the delete is a move the client did not see, and the
+	// online copy is the only content. Refuse it and say how to resolve it.
+	private string[string] onDemandPlaceholderIndex;
+	private SysTime onDemandPlaceholderIndexTime;
+
+	bool onDemandDeleteWouldLoseContent(Item itemToDelete, string path) {
+		// One walk of the sync directory serves a whole batch of deletes
+		string[string] placeholders;
+		synchronized (this) {
+			SysTime now = Clock.currTime();
+			if (onDemandPlaceholderIndexTime == SysTime.init || (now - onDemandPlaceholderIndexTime) > dur!"seconds"(60)) {
+				onDemandPlaceholderIndex = collectPlaceholderItemIds(".");
+				onDemandPlaceholderIndexTime = now;
+			}
+			placeholders = onDemandPlaceholderIndex;
+		}
+		if (placeholders.length == 0) {
+			return false;
+		}
+		if ("*" in placeholders) {
+			addLogEntry("WARNING: Not deleting " ~ path ~ " online: the Files On-Demand marker of " ~ placeholders["*"] ~ " is unreadable, so it cannot be ruled out that this is a moved placeholder. Fix or remove that file first.", ["info", "notify"]);
+			return true;
+		}
+		// The item itself and every database item below it
+		Item[] pending = [itemToDelete];
+		while (!pending.empty) {
+			Item current = pending[$ - 1];
+			pending = pending[0 .. $ - 1];
+			string checkId = (current.type == ItemType.remote && !current.remoteId.empty) ? current.remoteId : current.id;
+			if (checkId in placeholders || current.id in placeholders) {
+				string where = (checkId in placeholders) ? placeholders[checkId] : placeholders[current.id];
+				addLogEntry("WARNING: Not deleting " ~ path ~ " online: its content is only online, and its placeholder still exists at " ~ where ~ " (moved while not monitored?). Move it back, or run 'onedrive --download-now' on it before deleting.", ["info", "notify"]);
+				return true;
+			}
+			if (current.type == ItemType.dir || current.type == ItemType.root) {
+				pending ~= itemDB.selectChildren(current.driveId, current.id);
+			}
+		}
+		return false;
+	}
+
+	// Download a pinned placeholder found during a sync cycle
+	void hydratePinnedOnDemandPlaceholder(string localPath) {
+		OneDriveApi api = new OneDriveApi(appConfig);
+		api.initialise();
+		scope(exit) {
+			api.releaseCurlEngine();
+			api = null;
+		}
+		if (hydrateOnDemandPlaceholder(api, localPath)) {
+			notifyExpectedLocalFileDownload(localPath, false);
+		} else if (!canFind(fileDownloadFailures, localPath)) {
+			fileDownloadFailures ~= localPath;
+		}
+	}
+
+	// Turn one file back into a placeholder, but only when its bytes equal the current online file:
+	// "Free up space" must never discard a local edit.
+	bool dehydrateOnDemandFile(OneDriveApi api, string path, string syncBase) {
+		if (isOnDemandPlaceholder(path)) {
+			if (verboseLogging) {addLogEntry("Already online-only: " ~ path, ["verbose"]);}
+			return true;
+		}
+		string localRelative = "./" ~ relativePath(path, syncBase);
+		if (isPathPinnedOnDemand(localRelative)) {
+			addLogEntry("Skipping " ~ path ~ ": it is pinned by 'pin_list' (\"Always keep on this device\")");
+			return true;
+		}
+
+		JSONValue onlineItem;
+		try {
+			onlineItem = api.getPathDetails(relativePath(path, syncBase));
+		} catch (OneDriveException exception) {
+			if (exception.httpStatusCode == 404) {
+				addLogEntry("Skipping " ~ path ~ ": it does not exist online (not uploaded yet?)");
+			} else {
+				addLogEntry("ERROR: Unable to query the online file for " ~ path ~ " (HTTP " ~ to!string(exception.httpStatusCode) ~ ")");
+			}
+			return false;
+		}
+		if (onlineItem.type() != JSONType.object || !isFileItem(onlineItem)) {
+			addLogEntry("Skipping " ~ path ~ ": the online item is not a file");
+			return false;
+		}
+
+		SysTime modifiedTime;
+		string modifiedTimestamp;
+		if (!getFileSystemInfoLastModifiedDateTime(onlineItem, modifiedTime, modifiedTimestamp)) {
+			addLogEntry("ERROR: The online file for " ~ path ~ " has no valid modification time");
+			return false;
+		}
+		long size = hasFileSize(onlineItem) ? onlineItem["size"].integer : 0;
+
+		// The local bytes must be exactly the online file. Snapshot the file before hashing:
+		// convertToPlaceholder() refuses if anything about it changed after this point.
+		FileSnapshot verified;
+		if (!snapshotFile(path, verified)) {
+			addLogEntry("Skipping " ~ path ~ ": not a regular file");
+			return false;
+		}
+		PlaceholderIdentity identity;
+		identity.driveId = onlineItem["parentReference"]["driveId"].str;
+		identity.itemId = onlineItem["id"].str;
+		bool contentMatches = false;
+		if (hasQuickXorHash(onlineItem)) {
+			identity.contentHash = onlineItem["file"]["hashes"]["quickXorHash"].str;
+			contentMatches = computeQuickXorHash(path) == identity.contentHash;
+		} else if (hasSHA256Hash(onlineItem)) {
+			identity.contentHash = onlineItem["file"]["hashes"]["sha256Hash"].str;
+			contentMatches = toUpper(computeSHA256Hash(path)) == toUpper(identity.contentHash);
+		}
+		if (!contentMatches || verified.size != size) {
+			addLogEntry("Skipping " ~ path ~ ": the local file differs from the online file (unsynced edits?); not freeing it");
+			return false;
+		}
+
+		string error;
+		if (!convertToPlaceholder(path, verified, modifiedTime, identity, error)) {
+			addLogEntry("ERROR: Unable to free up space for " ~ path ~ ": " ~ error);
+			return false;
+		}
+		addLogEntry("Freed up space: " ~ path, ["info"]);
+		return true;
+	}
+
 	void downloadSingleFile(string pathToQuery) {
 		// Function Start Time
 		SysTime functionStartTime;

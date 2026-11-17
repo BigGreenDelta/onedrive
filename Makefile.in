@@ -28,10 +28,14 @@ ICON_SOURCE_SVG     = contrib/images/$(ICON_TARGET_SVG)
 ICON_APP_SOURCE_SVG = contrib/images/$(ICON_APP_TARGET_SVG)
 
 NOTIFICATIONS = @NOTIFICATIONS@
+FUSE = @FUSE@
+CC = @CC@
+CFLAGS = @CFLAGS@
+fuse3_CFLAGS = @fuse3_CFLAGS@
 HAVE_SYSTEMD = @HAVE_SYSTEMD@
 systemduserunitdir = @systemduserunitdir@
 systemdsystemunitdir = @systemdsystemunitdir@
-all_libs = @curl_LIBS@ @sqlite_LIBS@ @dbus_LIBS@ @notify_LIBS@ @bsd_inotify_LIBS@ @dynamic_linker_LIBS@
+all_libs = @curl_LIBS@ @sqlite_LIBS@ @dbus_LIBS@ @notify_LIBS@ @fuse3_LIBS@ @bsd_inotify_LIBS@ @dynamic_linker_LIBS@
 COMPLETIONS = @COMPLETIONS@
 BASH_COMPLETION_DIR = @BASH_COMPLETION_DIR@
 ZSH_COMPLETION_DIR = @ZSH_COMPLETION_DIR@
@@ -58,10 +62,15 @@ ifeq ($(NOTIFICATIONS),yes)
 GUI_NOTIFICATIONS = $(addprefix $(VERSION_DCFLAG)=,NoPragma NoGdk Notifications)
 endif
 
+ifeq ($(FUSE),yes)
+FUSE_DCFLAGS = $(VERSION_DCFLAG)=OnDemandFuse
+FUSE_OBJECTS = src/fusebridge.o
+endif
+
 system_unit_files = contrib/systemd/onedrive@.service
 user_unit_files = contrib/systemd/onedrive.service
 
-DOCFILES = readme.md config LICENSE changelog.md docs/advanced-usage.md docs/application-config-options.md docs/application-security.md docs/business-shared-items.md docs/client-architecture.md docs/contributing.md docs/docker.md docs/install.md docs/national-cloud-deployments.md docs/podman.md docs/privacy-policy.md docs/sharepoint-libraries.md docs/terms-of-service.md docs/ubuntu-package-install.md docs/usage.md docs/known-issues.md docs/webhooks.md docs/server-side-filtering-limitations.md docs/end_to_end_testing.md
+DOCFILES = readme.md config LICENSE changelog.md docs/advanced-usage.md docs/application-config-options.md docs/application-security.md docs/business-shared-items.md docs/client-architecture.md docs/contributing.md docs/docker.md docs/install.md docs/national-cloud-deployments.md docs/podman.md docs/privacy-policy.md docs/sharepoint-libraries.md docs/terms-of-service.md docs/ubuntu-package-install.md docs/usage.md docs/known-issues.md docs/webhooks.md docs/server-side-filtering-limitations.md docs/end_to_end_testing.md docs/files-on-demand.md
 
 ifneq ("$(wildcard /etc/redhat-release)","")
 RHEL = $(shell cat /etc/redhat-release | grep -E "(Red Hat Enterprise Linux|CentOS|AlmaLinux)" | wc -l)
@@ -88,6 +97,7 @@ SOURCES = \
 	src/monitor.d \
 	src/arsd/cgi.d \
 	src/xattr.d \
+	src/ondemand.d \
 	src/intune.d \
 	src/socketio.d \
 	src/curlWebsockets.d \
@@ -100,7 +110,7 @@ endif
 all: onedrive
 
 clean:
-	rm -f onedrive onedrive.o version
+	rm -f onedrive onedrive.o src/fusebridge.o version
 	rm -rf autom4te.cache
 	rm -f config.log config.status
 
@@ -108,13 +118,16 @@ clean:
 distclean: clean
 	rm -f Makefile contrib/pacman/PKGBUILD contrib/spec/onedrive.spec onedrive.1 $(system_unit_files) $(user_unit_files)
 
-onedrive: $(SOURCES)
+src/fusebridge.o: src/fusebridge.c
+	$(CC) $(CFLAGS) $(fuse3_CFLAGS) -Wall -c $< -o $@
+
+onedrive: $(SOURCES) $(FUSE_OBJECTS)
 	if [ -d .git ] || [ -f .git ]; then \
 		git describe --tags > version ; \
 	else \
 		echo $(version) > version ; \
 	fi
-	$(DC) -J. $(GUI_NOTIFICATIONS) $(DCFLAGS) $^ $(addprefix $(LINKER_DCFLAG),$(all_libs)) $(OUTPUT_DCFLAG)$@
+	$(DC) -J. $(GUI_NOTIFICATIONS) $(FUSE_DCFLAGS) $(DCFLAGS) $^ $(addprefix $(LINKER_DCFLAG),$(all_libs)) $(OUTPUT_DCFLAG)$@
 
 install: all
 	mkdir -p $(DESTDIR)$(bindir)

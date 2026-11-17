@@ -2,6 +2,7 @@
 onedrive
 onedrive.1
 onedrive.o
+src/fusebridge.o
 version
 Makefile
 config.log

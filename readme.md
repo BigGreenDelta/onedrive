@@ -1,4 +1,7 @@
 # OneDrive Client for Linux
+
+> [!NOTE]
+> This is the BigGreenDelta fork. It adds **Files On-Demand** (placeholders, download on open, "Always keep on this device", "Free up space"), like the Windows OneDrive client. See [docs/files-on-demand.md](docs/files-on-demand.md). Everything else follows upstream [abraunegg/onedrive](https://github.com/abraunegg/onedrive).
 [![Version](https://img.shields.io/github/v/release/abraunegg/onedrive?logo=github)](https://github.com/abraunegg/onedrive/releases)
 [![Release Date](https://img.shields.io/github/release-date/abraunegg/onedrive?logo=github)](https://github.com/abraunegg/onedrive/releases)
 
@@ -100,7 +103,7 @@ Sponsorship is entirely optional and does not alter access to the software, proj
 
 ## What's missing
 *   Ability to encrypt/decrypt files on-the-fly when uploading/downloading files from OneDrive
-*   Support for Windows 'On-Demand' functionality so file is only downloaded when accessed locally
+*   Upstream: support for Windows 'On-Demand' functionality. This fork adds it: see [Files On-Demand](docs/files-on-demand.md)
 
 ## External Enhancements
 

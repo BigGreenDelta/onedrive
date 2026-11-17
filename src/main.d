@@ -38,6 +38,7 @@ import monitor;
 import webhook;
 import intune;
 import socketio;
+import ondemand;
 
 // Native stack trace support for fatal signal diagnostics.
 // On OpenBSD this is provided by libexecinfo; on Linux this is provided by glibc.
@@ -767,10 +768,30 @@ int main(string[] cliArgs) {
 		return EXIT_FAILURE;
 	}
 	
+	// --mount-on-demand - Files On-Demand mount. It needs neither the database nor the API: opening a
+	// placeholder through the mount runs this executable with '--download-now'. Runs until unmounted.
+	if (appConfig.getValueBool("mount_on_demand")) {
+		return runOnDemandMount(appConfig, runtimeSyncDirectory, confdirOption);
+	}
+	
 	// Check for --dry-run operation or a 'no-sync' operation where the 'dry-run' DB copy should be used
 	// If this has been requested, we need to ensure that all actions are performed against the dry-run database copy, and, 
 	// no actual action takes place - such as deleting files if deleted online, moving files if moved online or local, downloading new & changed files, uploading new & changed files
-	if (dryRun || noSyncTaskOperationRequested) {
+	// Files On-Demand commands work from the online API and the identity stored in each placeholder.
+	// Several can run at once (one per file opened through the mount), so each gets a private, empty
+	// database, and they must not touch the shared items-dryrun copy another command may be using.
+	bool onDemandCommand = (appConfig.getValueString("download_now") != "") || (appConfig.getValueString("free_up_space") != "");
+	if (onDemandCommand) {
+		// These run unattended (the mount starts them when a file is opened): never start an interactive
+		// sign-in from here, it would block the application that opened the file
+		if (!exists(appConfig.refreshTokenFilePath) || getSize(appConfig.refreshTokenFilePath) == 0) {
+			addLogEntry("ERROR: The client is not signed in yet. Run 'onedrive' once on its own to sign in, then retry.");
+			return EXIT_FAILURE;
+		}
+		appConfig.databaseFilePathDryRun = buildNormalizedPath(buildPath(appConfig.configDirName, "items-ondemand-" ~ to!string(getpid()) ~ ".sqlite3"));
+		cleanupDatabaseFiles(appConfig.databaseFilePathDryRun);
+		runtimeDatabaseFile = appConfig.databaseFilePathDryRun;
+	} else if (dryRun || noSyncTaskOperationRequested) {
 		// Cleanup any existing dry-run elements ... these should never be left hanging around and should be cleaned up first
 		cleanupDatabaseFiles(appConfig.databaseFilePathDryRun);
 		
@@ -1182,6 +1203,15 @@ int main(string[] cliArgs) {
 					// Exit application
 					// Use exit scopes to shutdown API
 					return EXIT_SUCCESS;
+				}
+				
+				// --download-now / --free-up-space - Files On-Demand hydrate / dehydrate
+				if ((appConfig.getValueString("download_now") != "") || (appConfig.getValueString("free_up_space") != "")) {
+					bool hydrate = appConfig.getValueString("download_now") != "";
+					string requestedPath = hydrate ? appConfig.getValueString("download_now") : appConfig.getValueString("free_up_space");
+					bool actionSucceeded = syncEngineInstance.performOnDemandAction(requestedPath, runtimeSyncDirectory, hydrate);
+					// Use exit scopes to shutdown API
+					return actionSucceeded ? EXIT_SUCCESS : EXIT_FAILURE;
 				}
 				
 				// --download-file - Are we downloading a single file from Microsoft OneDrive

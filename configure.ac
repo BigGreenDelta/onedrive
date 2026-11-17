@@ -280,6 +280,19 @@ AC_SUBST([HAVE_SYSTEMD], $havesystemd)
 
 dnl
 dnl Notification support
+dnl Files On-Demand mount (--mount-on-demand) needs libfuse3; only with --enable-fuse
+AC_ARG_ENABLE(fuse,
+  AS_HELP_STRING([--enable-fuse], [Enable the Files On-Demand mount (--mount-on-demand) via libfuse3]))
+AS_IF([test "x$enable_fuse" = "xyes"], [enable_fuse=yes], [enable_fuse=no])
+AS_IF([test "x$enable_fuse" = "xyes"],
+      [PKG_CHECK_MODULES(fuse3,fuse3,,AC_MSG_ERROR([--enable-fuse requires libfuse3 (fuse3.pc) to be installed]))],
+      [AC_SUBST([fuse3_LIBS],"")
+       AC_SUBST([fuse3_CFLAGS],"")])
+AC_SUBST([FUSE],$enable_fuse)
+
+dnl A C compiler builds src/fusebridge.c (only used with --enable-fuse; LDC links through cc anyway)
+AC_PROG_CC
+
 dnl only check for libnotify if --enable-notifications is given
 AC_ARG_ENABLE(notifications,
   AS_HELP_STRING([--enable-notifications], [Enable desktop notifications via libnotify]))

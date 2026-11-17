@@ -35,6 +35,7 @@ Before reading this document, please ensure you are running application version 
   - [dry_run](#dry_run)
   - [enable_logging](#enable_logging)
   - [file_fragment_size](#file_fragment_size)
+  - [files_on_demand](#files_on_demand)
   - [force_http_11](#force_http_11)
   - [force_session_upload](#force_session_upload)
   - [inotify_delay](#inotify_delay)
@@ -50,6 +51,7 @@ Before reading this document, please ensure you are running application version 
   - [monitor_status](#monitor_status)
   - [no_remote_delete](#no_remote_delete)
   - [notify_file_actions](#notify_file_actions)
+  - [on_demand_mount_dir](#on_demand_mount_dir)
   - [notify_monitor_start](#notify_monitor_start)
   - [operation_timeout](#operation_timeout)
   - [permanent_delete](#permanent_delete)
@@ -510,6 +512,20 @@ _**CLI Option Use:**_ `--file-fragment-size = '25'`
 > 15, 20, 25, 30, 35, 40, 45, 50, 55
 
 
+### files_on_demand
+_**Description:**_ Fork feature. Keep online files as local placeholders (correct name, size and date, no content) until they are opened through the on-demand mount, downloaded with `--download-now`, or pinned in the `pin_list` file. Like Windows OneDrive Files On-Demand. See [Files On-Demand](files-on-demand.md).
+
+_**Value Type:**_ Boolean
+
+_**Default Value:**_ False
+
+_**Config Example:**_ `files_on_demand = "false"` or `files_on_demand = "true"`
+
+_**CLI Option Use:**_ *None - this is a config file option only*
+
+> [!NOTE]
+> Linux only. 'sync_dir' must be on a filesystem with user extended attributes. Turning this on never removes content that is already on this device.
+
 ### force_http_11
 _**Description:**_ This setting controls the application HTTP protocol version. By default, the application will use libcurl defaults for which HTTP protocol version will be used to interact with Microsoft OneDrive. Use this setting to downgrade libcurl to only use HTTP/1.1.
 
@@ -838,6 +854,20 @@ _**Config Example:**_ `notify_file_actions = "true"`
 
 > [!NOTE]
 > GUI Notification Support must be compiled in first, otherwise this option will have zero effect and will not be used.
+
+### on_demand_mount_dir
+_**Description:**_ Fork feature. The directory where `--mount-on-demand` shows the sync directory. Opening a placeholder there downloads it first. See [Files On-Demand](files-on-demand.md).
+
+_**Value Type:**_ String
+
+_**Default Value:**_ *Empty* - not set
+
+_**Config Example:**_ `on_demand_mount_dir = "~/OneDrive"`
+
+_**CLI Option Use:**_ *None - this is a config file option only*
+
+> [!IMPORTANT]
+> 'on_demand_mount_dir' and 'sync_dir' must not contain one another.
 
 ### notify_monitor_start
 _**Description:**_ This configuration option controls whether the client sends a concise GUI notification when `--monitor` mode becomes active. The notification summarises the local and remote monitoring mechanisms applicable to the current configuration. Disabling this option suppresses only the monitor-start GUI notification; console startup status logging and all other GUI notifications are unaffected.

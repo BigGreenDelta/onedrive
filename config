@@ -82,6 +82,8 @@
 
 ## This setting forces the client to only download data from Microsoft OneDrive and replicate that data locally.
 #download_only = "false"
+#files_on_demand = "false"
+#on_demand_mount_dir = ""
 
 ## This setting controls the specific drive identifier the client will use when syncing with Microsoft OneDrive.
 #drive_id = ""

@@ -265,6 +265,18 @@ Download a single file from Microsoft OneDrive.
 Specify the full online path to the file. No synchronisation will be performed.
 
 .TP
+\fB\-\-download-now\fR \fIPATH\fR
+Files On-Demand: download a placeholder file, or every placeholder under a directory.
+
+.TP
+\fB\-\-free-up-space\fR \fIPATH\fR
+Files On-Demand: turn an unmodified local file, or every unmodified file under a directory, back into a placeholder.
+
+.TP
+\fB\-\-mount-on-demand\fR
+Files On-Demand: mount the sync directory at 'on_demand_mount_dir'. Opening a placeholder there downloads it first.
+
+.TP
 \fB\-\-display-running-config\fR
 Display what options the client has been configured to use on application startup.
 

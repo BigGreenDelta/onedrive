@@ -32,6 +32,7 @@ import util;
 import curlEngine;
 import intune;
 import localAuth;
+import ondemand;
 
 // Downloads use a deterministic '<canonical>.partial' staging pathname. Multiple
 // reconciliation workers can legitimately reach the download subsystem in parallel,
@@ -2149,9 +2150,15 @@ class OneDriveApi {
 			// try and update the 'refresh_token' file on disk
 			try {
 				if (debugLogging) {addLogEntry("Updating 'refresh_token' on disk", ["debug"]);}
-				std.file.write(appConfig.refreshTokenFilePath, refreshToken);
+				// Write a private temporary file, then rename it over 'refresh_token' in one step, so a
+				// concurrent client process (for example a Files On-Demand download started by the mount)
+				// never reads a half-written or empty token and falls back to an interactive sign-in
+				string tokenTempPath = appConfig.refreshTokenFilePath ~ ".tmp-" ~ randomUUID().toString();
+				std.file.write(tokenTempPath, "");
 				if (debugLogging) {addLogEntry("Setting file permissions for: " ~ appConfig.refreshTokenFilePath, ["debug"]);}
-				appConfig.refreshTokenFilePath.setAttributes(appConfig.returnSecureFilePermission());
+				tokenTempPath.setAttributes(appConfig.returnSecureFilePermission());
+				std.file.write(tokenTempPath, refreshToken);
+				std.file.rename(tokenTempPath, appConfig.refreshTokenFilePath);
 			} catch (FileException exception) {
 				// display the error message
 				displayFileSystemErrorMessage(exception.msg, thisFunctionName, appConfig.refreshTokenFilePath);
@@ -2665,7 +2672,7 @@ class OneDriveApi {
 		bool canonicalExistsBeforeInspection = exists(originalFilename);
 		string canonicalHashBeforeInspection;
 		if (canonicalExistsBeforeInspection) {
-			canonicalHashBeforeInspection = computeQuickXorHash(originalFilename);
+			canonicalHashBeforeInspection = canonicalContentFingerprint(originalFilename);
 			if (canonicalHashBeforeInspection.empty) {
 				addLogEntry("ERROR: Unable to verify canonical file before download commit; refusing replacement: " ~ originalFilename, ["error", "notify"]);
 				safeRemove(downloadFilename);
@@ -2692,7 +2699,7 @@ class OneDriveApi {
 		bool canonicalExistsAfterInspection = exists(originalFilename);
 		bool canonicalChangedDuringInspection = canonicalExistsAfterInspection != canonicalExistsBeforeInspection;
 		if (!canonicalChangedDuringInspection && canonicalExistsAfterInspection) {
-			string canonicalHashAfterInspection = computeQuickXorHash(originalFilename);
+			string canonicalHashAfterInspection = canonicalContentFingerprint(originalFilename);
 			canonicalChangedDuringInspection = canonicalHashAfterInspection.empty ||
 				(canonicalHashAfterInspection != canonicalHashBeforeInspection);
 		}
