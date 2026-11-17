@@ -66,7 +66,8 @@ string getXAttr(string filePath, string attrName) {
             throw new XAttrException("Failed to get xattr '" ~ attrName ~ "' on '" ~ filePath ~ "': " ~ to!string(strerror(errno)));
         }
 
-        return cast(string)(buffer[0 .. size]);
+        // Copy out before scope(exit) frees the buffer
+        return (cast(char[])(buffer[0 .. ret])).idup;
     } else version (FreeBSD) {
         // First, determine the size
         ssize_t size = extattr_get_file(filePath.toStringz(), EXTATTR_NAMESPACE_USER, attrName.toStringz(), null, 0);
@@ -82,7 +83,8 @@ string getXAttr(string filePath, string attrName) {
             throw new XAttrException("Failed to get xattr '" ~ attrName ~ "' on '" ~ filePath ~ "': " ~ to!string(strerror(errno)));
         }
 
-        return cast(string)(buffer[0 .. size]);
+        // Copy out before scope(exit) frees the buffer
+        return (cast(char[])(buffer[0 .. ret])).idup;
     } else {
         throw new XAttrException("xattr not supported on this platform");
     }
