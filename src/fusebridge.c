@@ -224,31 +224,109 @@ static int run_hydrator(const char *real) {
 	return 0;
 }
 
-// Make sure the backing file at 'real' holds its content. 0 on success, -errno on failure.
-static int ensure_hydrated(const char *real) {
-	if (!is_placeholder(real)) {
-		return 0;
-	}
+// ----------------------------------------------------------------------------------
+// Status for desktop tools: <confdir>/ondemand-status.json holds the number of files
+// waiting for or in a download through this mount. Replaced atomically on each change.
+// ----------------------------------------------------------------------------------
 
-	pthread_mutex_lock(&inflight_lock);
+struct wanted {
+	char path[PATH_MAX];
+	int refs;
+	struct wanted *next;
+};
+static struct wanted *wanted_head = NULL;
+static int wanted_count = 0;
+
+static void status_path(char out[PATH_MAX + 32], const char *suffix) {
+	snprintf(out, PATH_MAX + 32, "%s/ondemand-status.json%s", conf_dir, suffix);
+}
+
+// Caller holds inflight_lock (or no FUSE thread runs yet)
+static void write_status(void) {
+	char final_path[PATH_MAX + 32], tmp_path[PATH_MAX + 32];
+	status_path(final_path, "");
+	status_path(tmp_path, ".tmp");
+	char stamp[32];
+	time_t now = time(NULL);
+	struct tm utc;
+	gmtime_r(&now, &utc);
+	strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
+	int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if (fd < 0) {
+		return;
+	}
+	char doc[256];
+	int n = snprintf(doc, sizeof(doc),
+		"{\n    \"application\": \"onedrive-ondemand\",\n    \"pid\": %ld,\n    \"downloads_pending\": %d,\n    \"updated_at\": \"%s\"\n}\n",
+		(long)getpid(), wanted_count, stamp);
+	int ok = n > 0 && (size_t)n < sizeof(doc) && write(fd, doc, (size_t)n) == n;
+	close(fd);
+	if (!ok || rename(tmp_path, final_path) != 0) {
+		unlink(tmp_path);
+	}
+}
+
+static void remove_status(void) {
+	char path[PATH_MAX + 32];
+	status_path(path, "");
+	unlink(path);
+	status_path(path, ".tmp");
+	unlink(path);
+}
+
+// Caller holds inflight_lock. Counts distinct files: three openers of one file are one download.
+static void want(const char *real) {
+	for (struct wanted *w = wanted_head; w; w = w->next) {
+		if (strcmp(w->path, real) == 0) {
+			w->refs++;
+			return;
+		}
+	}
+	struct wanted *w = calloc(1, sizeof(*w));
+	if (!w) {
+		return;
+	}
+	snprintf(w->path, sizeof(w->path), "%s", real);
+	w->refs = 1;
+	w->next = wanted_head;
+	wanted_head = w;
+	wanted_count++;
+	write_status();
+}
+
+// Caller holds inflight_lock
+static void unwant(const char *real) {
+	for (struct wanted **p = &wanted_head; *p; p = &(*p)->next) {
+		if (strcmp((*p)->path, real) == 0) {
+			if (--(*p)->refs == 0) {
+				struct wanted *old = *p;
+				*p = old->next;
+				free(old);
+				wanted_count--;
+				write_status();
+			}
+			return;
+		}
+	}
+}
+
+// Caller holds inflight_lock; returns with it held (it is released during the download)
+static int hydrate_locked(const char *real) {
 	while (inflight_contains(real) || downloads_running >= MAX_PARALLEL_DOWNLOADS) {
 		pthread_cond_wait(&inflight_done, &inflight_lock);
 	}
 	// Another opener may have finished the download while we waited
 	if (!is_placeholder(real)) {
-		pthread_mutex_unlock(&inflight_lock);
 		return 0;
 	}
 	if (recently_failed(real)) {
-		pthread_mutex_unlock(&inflight_lock);
 		return -EIO;
 	}
-	downloads_running++;
 	struct inflight *mine = calloc(1, sizeof(*mine));
 	if (!mine) {
-		pthread_mutex_unlock(&inflight_lock);
 		return -ENOMEM;
 	}
+	downloads_running++;
 	snprintf(mine->path, sizeof(mine->path), "%s", real);
 	mine->next = inflight_head;
 	inflight_head = mine;
@@ -272,6 +350,18 @@ static int ensure_hydrated(const char *real) {
 	}
 	free(mine);
 	pthread_cond_broadcast(&inflight_done);
+	return rc;
+}
+
+// Make sure the backing file at 'real' holds its content. 0 on success, -errno on failure.
+static int ensure_hydrated(const char *real) {
+	if (!is_placeholder(real)) {
+		return 0;
+	}
+	pthread_mutex_lock(&inflight_lock);
+	want(real);
+	int rc = hydrate_locked(real);
+	unwant(real);
 	pthread_mutex_unlock(&inflight_lock);
 	return rc;
 }
@@ -652,5 +742,8 @@ int onedrive_fuse_mount(const char *backing, const char *mountpoint, const char 
 		argv[argc++] = "-d";
 	}
 	argv[argc] = NULL;
-	return fuse_main(argc, argv, &od_operations, NULL);
+	write_status();
+	int rc = fuse_main(argc, argv, &od_operations, NULL);
+	remove_status();
+	return rc;
 }

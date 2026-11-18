@@ -39,6 +39,7 @@ import webhook;
 import intune;
 import socketio;
 import ondemand;
+import transferstatus;
 
 // Native stack trace support for fatal signal diagnostics.
 // On OpenBSD this is provided by libexecinfo; on Linux this is provided by glibc.
@@ -243,6 +244,14 @@ void writeMonitorStatusFile() {
 				"recycle_bin_failures": JSONValue(cast(long)monitorRuntimeStatus.recycleBinFailures)
 			])
 		]),
+		// Fork: files this process still has to transfer (see src/transferstatus.d)
+		"transfers": JSONValue([
+			"uploads_pending": JSONValue(uploadsPending),
+			"downloads_pending": JSONValue(downloadsPending),
+			"local_changes_pending": JSONValue(localChangesPending),
+			"upload_failures_unresolved": JSONValue(syncEngineInstance is null ? 0L : cast(long)syncEngineInstance.fileUploadFailures.length),
+			"download_failures_unresolved": JSONValue(syncEngineInstance is null ? 0L : cast(long)syncEngineInstance.fileDownloadFailures.length)
+		]),
 		"conditions": JSONValue([
 			"onedrive_reachability": JSONValue(monitorRuntimeStatus.oneDriveReachability),
 			"system_time": JSONValue(monitorRuntimeStatus.systemTimeState)
@@ -288,6 +297,7 @@ void initialiseMonitorRuntimeStatus(SysTime applicationStartedAt, MonoTime appli
 	monitorRuntimeStatus.lastCycleResult = "never_run";
 	monitorRuntimeStatus.oneDriveReachability = "unknown";
 	monitorRuntimeStatus.systemTimeState = appConfig.getSystemTimeStateString();
+	transferStatusChanged = delegate() { writeMonitorStatusFile(); };
 	writeMonitorStatusFile();
 }
 
@@ -370,6 +380,7 @@ void completeMonitorRuntimeStatusShutdown() {
 	// monitor-status.json represents a currently running --monitor process.
 	// Remove it during orderly shutdown so external consumers cannot mistake
 	// completed process state for a live monitor instance.
+	transferStatusChanged = null;
 	removeMonitorStatusFileIfPresent();
 	monitorRuntimeStatus.enabled = false;
 }
@@ -2117,6 +2128,8 @@ int main(string[] cliArgs) {
 						// The next loop captures pending inotify events before acknowledging.
 						if (res == 1 && filesystemMonitor.initialised) {
 							filesystemMonitorStartOrAckPending = true;
+							// Fork: a local change exists from this moment, before it is batched and queued
+							setLocalChangesPending(true);
 						}
 
 						// Debug logging of worker status
@@ -2611,6 +2624,8 @@ void captureAndApplyInotifyEvents(string invocationSource) {
 	}
 	filesystemMonitor.clearExpectedEvents(invocationSource);
 	applyPendingLocalChanges(invocationSource);
+	// Fork: every captured change has now been applied (uploads finished or recorded as failures)
+	setLocalChangesPending(false);
 }
 
 // Complete an online-to-local application cycle using the same observation

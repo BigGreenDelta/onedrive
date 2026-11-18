@@ -40,6 +40,7 @@ import itemdb;
 import clientSideFiltering;
 import xattr;
 import ondemand;
+import transferstatus;
 import curlEngine : CurlResponse;
 
 // Microsoft OneDrive item-count advisory threshold; not a Graph API hard limit.
@@ -4706,6 +4707,10 @@ class SyncEngine {
 
 		// Process fileJSONItemsToDownload
 		// To handle SIGINT (CTRL-C) and SIGTERM (kill) events we need to check the event in the foreach loop
+		// Fork: publish how many files this pass still has to transfer (monitor-status.json)
+		transfersQueued(TransferKind.download, fileJSONItemsToDownload.length);
+		size_t downloadsNotFinished = fileJSONItemsToDownload.length;
+		scope(exit) transfersFinished(TransferKind.download, downloadsNotFinished);
 		foreach (chunk; fileJSONItemsToDownload.chunks(batchSize)) {
 			// There are files to transfer
 			fileTransferInProgress = true;
@@ -4718,6 +4723,8 @@ class SyncEngine {
 
 			// send an array containing 'appConfig.getValueLong("threads")' JSON items to download
 			downloadOneDriveItemsInParallel(chunk);
+			transfersFinished(TransferKind.download, chunk.length);
+			downloadsNotFinished -= chunk.length;
 
 			// Track attempted uploads. The 'chunks' are JSON entries, so we need to extract the path from the JSON elements
 			foreach (onedriveJSONItem; chunk) {
@@ -8244,8 +8251,14 @@ class SyncEngine {
 		long batchesProcessed = 0;
 
 		// For each batch of files to upload, upload the changed data to OneDrive
+		// Fork: publish how many files this pass still has to transfer (monitor-status.json)
+		transfersQueued(TransferKind.upload, databaseItemsWhereContentHasChanged.length);
+		size_t changedUploadsNotFinished = databaseItemsWhereContentHasChanged.length;
+		scope(exit) transfersFinished(TransferKind.upload, changedUploadsNotFinished);
 		foreach (chunk; databaseItemsWhereContentHasChanged.chunks(batchSize)) {
 			processChangedLocalItemsToUploadInParallel(chunk);
+			transfersFinished(TransferKind.upload, chunk.length);
+			changedUploadsNotFinished -= chunk.length;
 		}
 
 		// For this set of items, perform a DB PASSIVE checkpoint
@@ -11317,6 +11330,10 @@ class SyncEngine {
 
 		// To handle SIGINT (CTRL-C) and SIGTERM (kill) events we need to check the event in the foreach loop
 		// Process newLocalFilesToUploadToOneDrive
+		// Fork: publish how many files this pass still has to transfer (monitor-status.json)
+		transfersQueued(TransferKind.upload, newLocalFilesToUploadToOneDrive.length);
+		size_t newUploadsNotFinished = newLocalFilesToUploadToOneDrive.length;
+		scope(exit) transfersFinished(TransferKind.upload, newUploadsNotFinished);
 		foreach (chunk; newLocalFilesToUploadToOneDrive.chunks(batchSize)) {
 			// There are files to transfer
 			fileTransferInProgress = true;
@@ -11329,6 +11346,8 @@ class SyncEngine {
 
 			// send an array containing 'appConfig.getValueLong("threads")' local files to upload
 			uploadNewLocalFileItemsInParallel(chunk);
+			transfersFinished(TransferKind.upload, chunk.length);
+			newUploadsNotFinished -= chunk.length;
 
 			// Track attempted uploads
 			filesUploaded ~= chunk;

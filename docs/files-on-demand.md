@@ -112,7 +112,18 @@ Turning `files_on_demand` on never removes content: files that are already on th
 - A file downloaded on demand records its item id and the hash of the downloaded bytes (`user.onedrive.hydrated`). Until the sync catches up with the online version it came from, the client recognises it as unchanged online content and does not upload it. Once you edit it, it uploads normally, and the marker is removed.
 - Downloads on open respect `space_reservation`, `disable_download_validation` and the malware flag, like normal downloads.
 
-## Limits
+## Status for desktop tools
+
+Two JSON files in the config directory report what is moving, for a status bar or a script. Each is replaced atomically, so a reader never sees half a file, and each carries the `pid` of its writer: a file whose process is gone is stale.
+
+- `monitor-status.json`, from `--monitor` (see [monitor_status](application-config-options.md#monitor_status)). This fork adds a `transfers` block:
+  - `uploads_pending`, `downloads_pending`: files queued or in transfer in the current pass, updated after every batch of `threads` files.
+  - `local_changes_pending`: `true` from the moment the local watcher reports a change until the monitor has applied it. A saved file waits in inotify batching (up to 5 seconds, plus `inotify_delay` when `delay_inotify_processing` is on) before it becomes a counted upload; this flag covers that gap.
+  - `upload_failures_unresolved`, `download_failures_unresolved`: failed transfers not yet retried.
+- `ondemand-status.json`, from `--mount-on-demand`: `downloads_pending` counts files waiting for or in a download because they were opened. Several opens of one file count once. Removed when the mount stops.
+
+Everything is uploaded only when `process.state` is `idle`, all counts are 0 and `local_changes_pending` is `false`.
+
 
 - Use your files through `on_demand_mount_dir`. Reading a placeholder directly in `sync_dir` returns zeros, because a placeholder has no content.
 - Opening a placeholder without network access fails. When a download receives no new data for `on_demand_stall_timeout` seconds (default 60), it is stopped and the open fails with "Connection timed out"; other download failures give "Input/output error". The limit is on progress, not on total time, so a large file on a slow connection is never stopped while data keeps arriving. Opening a stopped large file (4 MiB or more) again resumes where the download stopped.

@@ -98,6 +98,7 @@ SOURCES = \
 	src/arsd/cgi.d \
 	src/xattr.d \
 	src/ondemand.d \
+	src/transferstatus.d \
 	src/intune.d \
 	src/socketio.d \
 	src/curlWebsockets.d \
