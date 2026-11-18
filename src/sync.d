@@ -205,6 +205,13 @@ class SyncEngine {
 	// updates to the shared upload-failure list so failures are not lost when
 	// multiple workers finish at the same time.
 	private Mutex fileUploadFailureMutex;
+	// Fork fix: fetchRealOnlineDriveIdentifier() answers from this cache after the first
+	// lookup per drive. saveDatabaseItem() calls it for every item on a Personal account,
+	// which cost one API round trip per file and folder (hours on a first sync of a large
+	// drive). A drive's real identifier does not change while the client runs. Download
+	// workers save items too, hence the mutex.
+	private Mutex realOnlineDriveIdMutex;
+	private string[string] realOnlineDriveIdCache;
 	// List of path names changed online, but not changed locally when using --dry-run
 	string[] pathsRenamed;
 	// Local paths retained during --download-only --cleanup-local-files scanning.
@@ -556,6 +563,7 @@ class SyncEngine {
 		// Initialise the small cross-thread hand-off used only by online file
 		// download workers to declare their resulting local filesystem events.
 		expectedLocalEffectMutex = new Mutex();
+		realOnlineDriveIdMutex = new Mutex();
 		fileUploadFailureMutex = new Mutex();
 
 		// Create the specific task pool to process items in parallel
@@ -13599,6 +13607,18 @@ class SyncEngine {
 			addLogEntry(fetchRealValueLogMessage, ["debug"]);
 		}
 
+		// Answer from the cache when this drive was looked up before
+		realOnlineDriveIdMutex.lock();
+		string* cachedDriveId = inputDriveId in realOnlineDriveIdCache;
+		string cachedValue = (cachedDriveId !is null) ? *cachedDriveId : null;
+		realOnlineDriveIdMutex.unlock();
+		if (cachedValue !is null) {
+			if (appConfig.getValueBool("display_processing_time") && debugLogging) {
+				displayFunctionProcessingTime(thisFunctionName, functionStartTime, Clock.currTime(), logKey);
+			}
+			return cachedValue;
+		}
+
 		// variables for this function
 		JSONValue remoteDriveDetails;
 		OneDriveApi fetchDriveDetailsOneDriveApiInstance;
@@ -13627,6 +13647,10 @@ class SyncEngine {
 		if (hasParentReferenceDriveId(remoteDriveDetails)) {
 			// We have a [parentReference][driveId] reference driveId to use
 			outputDriveId = remoteDriveDetails["parentReference"]["driveId"].str;
+			// Only a real answer is cached, so a failed lookup is tried again next time
+			realOnlineDriveIdMutex.lock();
+			realOnlineDriveIdCache[inputDriveId] = outputDriveId;
+			realOnlineDriveIdMutex.unlock();
 		} else {
 			// We dont have a value from online we can use
 			// Test existing driveId length and validation
