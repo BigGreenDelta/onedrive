@@ -52,6 +52,8 @@ Before reading this document, please ensure you are running application version 
   - [no_remote_delete](#no_remote_delete)
   - [notify_file_actions](#notify_file_actions)
   - [on_demand_mount_dir](#on_demand_mount_dir)
+  - [on_demand_cache_max_gb](#on_demand_cache_max_gb)
+  - [on_demand_free_after_days](#on_demand_free_after_days)
   - [on_demand_stall_timeout](#on_demand_stall_timeout)
   - [notify_monitor_start](#notify_monitor_start)
   - [operation_timeout](#operation_timeout)
@@ -869,6 +871,28 @@ _**CLI Option Use:**_ *None - this is a config file option only*
 
 > [!IMPORTANT]
 > 'on_demand_mount_dir' and 'sync_dir' must not contain one another.
+
+### on_demand_cache_max_gb
+_**Description:**_ Fork feature. The disk space that files opened on demand may use in total. When they use more, `--monitor` makes the least recently opened ones online-only again, like "Free up space", until they fit. Pinned files (`pin_list`), files with unsynced edits and files opened in the last 10 minutes are never freed, and pinned files do not count. `0` turns the limit off. See [Files On-Demand](files-on-demand.md).
+
+_**Value Type:**_ Integer (GB)
+
+_**Default Value:**_ 10
+
+_**Config Example:**_ `on_demand_cache_max_gb = "10"`
+
+_**CLI Option Use:**_ *None - this is a config file option only*
+
+### on_demand_free_after_days
+_**Description:**_ Fork feature. A file opened on demand that has not been opened again for this many days is made online-only again by `--monitor`, like Windows Storage Sense. The same files are protected as for `on_demand_cache_max_gb`. `0` turns it off. See [Files On-Demand](files-on-demand.md).
+
+_**Value Type:**_ Integer (days)
+
+_**Default Value:**_ 0
+
+_**Config Example:**_ `on_demand_free_after_days = "30"`
+
+_**CLI Option Use:**_ *None - this is a config file option only*
 
 ### on_demand_stall_timeout
 _**Description:**_ Fork feature. When a download started by opening a placeholder through `--mount-on-demand` receives no new data for this many seconds, the download is stopped and the open fails with "Connection timed out". The limit is on progress, not on total time: a large file on a slow connection is never stopped while data keeps arriving. Opening a large file again resumes the download where it stopped. See [Files On-Demand](files-on-demand.md).

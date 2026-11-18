@@ -85,6 +85,8 @@
 #files_on_demand = "false"
 #on_demand_mount_dir = ""
 #on_demand_stall_timeout = "60"
+#on_demand_cache_max_gb = "10"
+#on_demand_free_after_days = "0"
 
 ## This setting controls the specific drive identifier the client will use when syncing with Microsoft OneDrive.
 #drive_id = ""

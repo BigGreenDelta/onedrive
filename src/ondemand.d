@@ -321,6 +321,16 @@ bool markHydrated(string path, string itemId, string contentHash) {
 	}
 }
 
+// Does the file carry the marker of a download made for Files On-Demand (opened through the
+// mount or fetched with --download-now)? Only such files are freed automatically.
+bool hasHydratedMarker(string path) {
+	version (linux) {
+		return hasXattr(path, hydratedXattrName);
+	} else {
+		return false;
+	}
+}
+
 // Forget the hydrated marker (the file is being uploaded, so it is local content now)
 void clearHydratedMarker(string path) {
 	version (linux) {

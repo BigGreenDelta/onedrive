@@ -252,6 +252,18 @@ void writeMonitorStatusFile() {
 			"upload_failures_unresolved": JSONValue(syncEngineInstance is null ? 0L : cast(long)syncEngineInstance.fileUploadFailures.length),
 			"download_failures_unresolved": JSONValue(syncEngineInstance is null ? 0L : cast(long)syncEngineInstance.fileDownloadFailures.length)
 		]),
+		// Fork: Files On-Demand disk use and automatic free up space (see runOnDemandAutoCleanup)
+		"on_demand": JSONValue([
+			"usage_known": JSONValue(onDemandUsageKnown),
+			"pinned_bytes": JSONValue(onDemandPinnedBytes),
+			"opened_bytes": JSONValue(onDemandOpenedBytes),
+			"other_bytes": JSONValue(onDemandOtherBytes),
+			"cache_max_gb": JSONValue(appConfig.getValueLong("on_demand_cache_max_gb")),
+			"free_after_days": JSONValue(appConfig.getValueLong("on_demand_free_after_days")),
+			"last_cleanup_at": JSONValue(onDemandLastCleanupAt),
+			"last_cleanup_freed_files": JSONValue(onDemandFreedFiles),
+			"last_cleanup_freed_bytes": JSONValue(onDemandFreedBytes)
+		]),
 		"conditions": JSONValue([
 			"onedrive_reachability": JSONValue(monitorRuntimeStatus.oneDriveReachability),
 			"system_time": JSONValue(monitorRuntimeStatus.systemTimeState)
@@ -1990,6 +2002,16 @@ int main(string[] cliArgs) {
 					// full scans and post-scan RSS recovery. Small-scale testing alone
 					// is insufficient to establish equivalent memory behaviour.
 					
+					// Fork: Files On-Demand automatic free up space, and the disk use the bar shows.
+					// Never lets a problem here stop the monitor loop.
+					if (syncEngineInstance !is null) {
+						try {
+							syncEngineInstance.runOnDemandAutoCleanup(runtimeSyncDirectory, monitorCycleOneDriveReachability == "reachable");
+						} catch (Exception e) {
+							addLogEntry("Files On-Demand cleanup failed: " ~ e.msg);
+						}
+					}
+
 					// Publish one completed-cycle snapshot after scheduled synchronisation work
 					// has finished. Keep this before the monitor-loop GC boundary so temporary
 					// JSON publication allocations can be reclaimed during the same loop.

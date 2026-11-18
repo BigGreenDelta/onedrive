@@ -623,6 +623,24 @@ static int od_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
 	return 0;
 }
 
+// Record an open as the file's access time. The monitor's automatic "free up space" makes the
+// least recently opened files online-only first, and the sync folder is usually mounted noatime,
+// so the kernel would not record it. The sync ignores access times (and the inotify watch does
+// not report attribute changes), so this never reads as an edit. At most once an hour per file.
+static void note_opened(int fd) {
+	struct stat st;
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+		return;
+	}
+	struct timespec now;
+	clock_gettime(CLOCK_REALTIME, &now);
+	if (st.st_atim.tv_sec > now.tv_sec - 3600) {
+		return;
+	}
+	struct timespec times[2] = {{0, UTIME_NOW}, {0, UTIME_OMIT}};
+	futimens(fd, times);
+}
+
 static int od_open(const char *path, struct fuse_file_info *fi) {
 	char real[PATH_MAX];
 	int rc = backing_path(real, path);
@@ -637,6 +655,7 @@ static int od_open(const char *path, struct fuse_file_info *fi) {
 	if (fd < 0) {
 		return -errno;
 	}
+	note_opened(fd);
 	fi->fh = (uint64_t)fd;
 	return 0;
 }

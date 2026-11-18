@@ -99,6 +99,17 @@ WantedBy=default.target
 
 `<path>` can be inside `on_demand_mount_dir` or inside `sync_dir`. These commands can run while `--monitor` is running. They never start an interactive sign-in: sign in first.
 
+## Free up space automatically
+
+Like Windows Storage Sense, `--monitor` makes files online-only again after every cycle:
+
+- `on_demand_free_after_days` (default 0, off): a file not opened for that many days is freed.
+- `on_demand_cache_max_gb` (default 10, 0 = no limit): when files opened on demand use more than this, the least recently opened are freed until the rest fit.
+
+Only files downloaded for Files On-Demand are freed: opened through the mount, or fetched with `--download-now`. Pinned files, files you created or edited here, files opened in the last 10 minutes and files whose bytes differ from the online file are never freed. Each file is checked against the online file first, exactly as `--free-up-space` does, and nothing is freed while OneDrive is unreachable.
+
+The mount records an open as the file's access time (the sync folder is often mounted `noatime`, so the kernel would not), at most once an hour per file. The sync ignores access times.
+
 ## What happens to existing files
 
 Turning `files_on_demand` on never removes content: files that are already on this device stay there. Only new online files, and files whose path holds nothing yet, become placeholders. To free space, run `--free-up-space` on the folders you don't need locally.
@@ -120,6 +131,7 @@ Two JSON files in the config directory report what is moving, for a status bar o
   - `uploads_pending`, `downloads_pending`: files queued or in transfer in the current pass, updated after every batch of `threads` files.
   - `local_changes_pending`: `true` from the moment the local watcher reports a change until the monitor has applied it. A saved file waits in inotify batching (up to 5 seconds, plus `inotify_delay` when `delay_inotify_processing` is on) before it becomes a counted upload; this flag covers that gap.
   - `upload_failures_unresolved`, `download_failures_unresolved`: failed transfers not yet retried.
+  - and an `on_demand` block, refreshed after every cycle by the automatic free-up pass: `pinned_bytes` (files covered by `pin_list`), `opened_bytes` (files downloaded because they were opened, the ones the pass may free), `other_bytes` (other local content), `cache_max_gb` and `free_after_days` (the settings in use), `last_cleanup_at`, `last_cleanup_freed_files` and `last_cleanup_freed_bytes`. `usage_known` is `false` until the first pass has run.
 - `ondemand-status.json`, from `--mount-on-demand`: `downloads_pending` counts files waiting for or in a download because they were opened. Several opens of one file count once. Removed when the mount stops.
 
 Everything is uploaded only when `process.state` is `idle`, all counts are 0 and `local_changes_pending` is `false`.

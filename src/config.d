@@ -417,6 +417,12 @@ class ApplicationConfig {
 		stringValues["on_demand_mount_dir"] = "";
 		// Files On-Demand: a download through the mount that makes no progress for this many seconds is stopped
 		longValues["on_demand_stall_timeout"] = 60;
+		// Files On-Demand: files opened on demand may hold this many GB in total; beyond it the least
+		// recently opened are made online-only again (0 = no limit). Pinned files never count.
+		longValues["on_demand_cache_max_gb"] = 10;
+		// Files On-Demand: a file opened on demand and not opened again for this many days is made
+		// online-only again (0 = never)
+		longValues["on_demand_free_after_days"] = 0;
 		// Publish machine-readable monitor runtime status to <confdir>/monitor-status.json
 		// Enabled by default so monitor observability is available without additional configuration.
 		boolValues["monitor_status"] = true;
@@ -1834,6 +1840,8 @@ class ApplicationConfig {
 		addLogEntry("Config option 'files_on_demand'               = " ~ to!string(getValueBool("files_on_demand")));
 		addLogEntry("Config option 'on_demand_mount_dir'           = " ~ getValueString("on_demand_mount_dir"));
 		addLogEntry("Config option 'on_demand_stall_timeout'       = " ~ to!string(getValueLong("on_demand_stall_timeout")));
+		addLogEntry("Config option 'on_demand_cache_max_gb'        = " ~ to!string(getValueLong("on_demand_cache_max_gb")));
+		addLogEntry("Config option 'on_demand_free_after_days'    = " ~ to!string(getValueLong("on_demand_free_after_days")));
 		addLogEntry("Files On-Demand 'pin_list' configured         = " ~ to!string(exists(pinListFilePath)));
 		addLogEntry("Config option 'local_first'                   = " ~ to!string(getValueBool("local_first")));
 		addLogEntry("Config option 'mirror_local_state'            = " ~ to!string(getValueBool("mirror_local_state")));

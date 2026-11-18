@@ -47,3 +47,14 @@ void setLocalChangesPending(bool pending) {
 	localChangesPending = pending;
 	publish();
 }
+
+// Fork feature: disk use of Files On-Demand content, measured by the cleanup pass that
+// --monitor runs after every cycle (SyncEngine.runOnDemandAutoCleanup), published in
+// monitor-status.json ("on_demand") for the bar's OneDrive panel. Main thread only.
+bool onDemandUsageKnown = false;
+long onDemandPinnedBytes = 0;   // files covered by 'pin_list' ("Always keep on this device")
+long onDemandOpenedBytes = 0;   // files downloaded because they were opened: freed automatically
+long onDemandOtherBytes = 0;    // other content: files made here, files downloaded before on-demand
+long onDemandFreedFiles = 0;    // freed by the last cleanup pass
+long onDemandFreedBytes = 0;
+string onDemandLastCleanupAt = "";

@@ -19897,6 +19897,102 @@ class SyncEngine {
 		}
 	}
 
+	// Fork feature: automatic "free up space" for files opened on demand, run by --monitor after
+	// every cycle. Measures what is on this device (published for the bar), then makes files
+	// online-only again: first those not opened for 'on_demand_free_after_days', then the least
+	// recently opened until the rest fit in 'on_demand_cache_max_gb'. Only files carrying the
+	// hydrated marker are candidates; pinned files, files opened in the last 10 minutes and files
+	// whose bytes differ from the online file (dehydrateOnDemandFile() checks) are kept.
+	// The mount records an open as the file's access time (the sync folder is often noatime).
+	void runOnDemandAutoCleanup(string syncDir, bool online) {
+		if (!filesOnDemandActive()) {
+			return;
+		}
+		struct Candidate {
+			string path;
+			long lastOpened;
+			long bytes;
+		}
+		string base = buildNormalizedPath(absolutePath(expandTilde(syncDir)));
+		long pinnedBytes = 0, openedBytes = 0, otherBytes = 0;
+		Candidate[] candidates;
+		try {
+			foreach (DirEntry entry; dirEntries(base, SpanMode.depth, false)) {
+				if (!entry.isFile || entry.isSymlink || entry.name.endsWith(".partial")) {
+					continue;
+				}
+				auto st = entry.statBuf;
+				long bytes = cast(long) st.st_blocks * 512;
+				// Placeholders are sparse: they hold no blocks, so they cost nothing here
+				if (bytes == 0) {
+					continue;
+				}
+				if (isPathPinnedOnDemand("./" ~ relativePath(entry.name, base))) {
+					pinnedBytes += bytes;
+				} else if (hasHydratedMarker(entry.name)) {
+					openedBytes += bytes;
+					candidates ~= Candidate(entry.name, cast(long) st.st_atime, bytes);
+				} else {
+					otherBytes += bytes;
+				}
+			}
+		} catch (FileException e) {
+			// A folder that vanished during the walk: measure again next cycle
+			if (debugLogging) {addLogEntry("Files On-Demand cleanup: walk interrupted: " ~ e.msg, ["debug"]);}
+			return;
+		}
+
+		long freedFiles = 0, freedBytes = 0;
+		long maxBytes = appConfig.getValueLong("on_demand_cache_max_gb") * 1024L * 1024L * 1024L;
+		long freeAfterDays = appConfig.getValueLong("on_demand_free_after_days");
+		long now = Clock.currTime().toUnixTime();
+		long recentlyOpened = now - 10 * 60;
+		bool overLimit = maxBytes > 0 && openedBytes > maxBytes;
+		bool ageLimit = freeAfterDays > 0;
+		if (online && (overLimit || ageLimit) && !candidates.empty) {
+			candidates.sort!((a, b) => a.lastOpened < b.lastOpened);
+			long ageCutoff = now - freeAfterDays * 86400;
+			OneDriveApi api;
+			scope(exit) {
+				if (api !is null) {
+					api.releaseCurlEngine();
+					api = null;
+				}
+			}
+			foreach (candidate; candidates) {
+				bool tooOld = ageLimit && candidate.lastOpened < ageCutoff;
+				bool needRoom = maxBytes > 0 && openedBytes > maxBytes;
+				if (!tooOld && !needRoom) {
+					// Sorted oldest first: nothing later is older, and the rest fits
+					break;
+				}
+				if (candidate.lastOpened >= recentlyOpened) {
+					break;
+				}
+				if (api is null) {
+					api = new OneDriveApi(appConfig);
+					api.initialise();
+				}
+				if (dehydrateOnDemandFile(api, candidate.path, base)) {
+					openedBytes -= candidate.bytes;
+					freedBytes += candidate.bytes;
+					freedFiles++;
+				}
+			}
+			if (freedFiles > 0) {
+				addLogEntry("Files On-Demand: made " ~ to!string(freedFiles) ~ " file(s) online-only again (" ~ to!string(freedBytes / (1024 * 1024)) ~ " MB freed)");
+			}
+		}
+
+		onDemandUsageKnown = true;
+		onDemandPinnedBytes = pinnedBytes;
+		onDemandOpenedBytes = openedBytes;
+		onDemandOtherBytes = otherBytes;
+		onDemandFreedFiles = freedFiles;
+		onDemandFreedBytes = freedBytes;
+		onDemandLastCleanupAt = Clock.currTime(UTC()).toISOExtString();
+	}
+
 	// Turn one file back into a placeholder, but only when its bytes equal the current online file:
 	// "Free up space" must never discard a local edit.
 	bool dehydrateOnDemandFile(OneDriveApi api, string path, string syncBase) {
