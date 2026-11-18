@@ -144,6 +144,19 @@ static double monotonic_seconds(void) {
 	return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
+// A client that was killed, by us or by anything else, cannot clean up its per-process
+// database copy: remove it here so copies do not pile up in the config folder
+static void remove_hydrator_db(pid_t pid) {
+	static const char *suffixes[] = {"", "-wal", "-shm", "-journal"};
+	for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+		char db[PATH_MAX + 64];
+		int n = snprintf(db, sizeof(db), "%s/items-ondemand-%ld.sqlite3%s", conf_dir, (long)pid, suffixes[i]);
+		if (n > 0 && (size_t)n < sizeof(db)) {
+			unlink(db);
+		}
+	}
+}
+
 // Stop a download that stopped making progress: ask first (the client then removes its
 // private database), force it after a grace period. A forced stop leaves the '.partial'
 // file in place, so the next open of a large file resumes from it instead of starting over.
@@ -161,15 +174,7 @@ static void stop_hydrator(pid_t pid) {
 	kill(pid, SIGKILL);
 	while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
 	}
-	// A killed client cannot clean up its per-process database: remove it here
-	static const char *suffixes[] = {"", "-wal", "-shm", "-journal"};
-	for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
-		char db[PATH_MAX + 64];
-		int n = snprintf(db, sizeof(db), "%s/items-ondemand-%ld.sqlite3%s", conf_dir, (long)pid, suffixes[i]);
-		if (n > 0 && (size_t)n < sizeof(db)) {
-			unlink(db);
-		}
-	}
+	remove_hydrator_db(pid);
 }
 
 static int run_hydrator(const char *real) {
@@ -219,6 +224,7 @@ static int run_hydrator(const char *real) {
 	}
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
 		fprintf(stderr, "onedrive-ondemand: download failed for %s\n", real);
+		remove_hydrator_db(pid);
 		return -EIO;
 	}
 	return 0;
