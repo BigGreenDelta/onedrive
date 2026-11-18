@@ -99,6 +99,14 @@ WantedBy=default.target
 
 `<path>` can be inside `on_demand_mount_dir` or inside `sync_dir`. These commands can run while `--monitor` is running. They never start an interactive sign-in: sign in first.
 
+## Browsing does not download
+
+Opening an online-only file downloads it, but a file manager opens files only to look at them: to draw thumbnails and to tell a file's type. The mount refuses those reads so browsing a folder never downloads it, like Windows:
+
+- thumbnailers (`glycin…`, any program with `thumb` in its name) and desktop indexers (`localsearch`, `tracker…`) get "Input/output error" for an online-only file, and show a generic icon;
+- the file manager itself (`nautilus`) may download files up to 1 MiB, which it reads to tell their type when the name does not;
+- every other program, and any file you open from the file manager, downloads as usual.
+
 ## Free up space automatically
 
 Like Windows Storage Sense, `--monitor` makes files online-only again after every cycle:

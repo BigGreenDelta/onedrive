@@ -359,10 +359,60 @@ static int hydrate_locked(const char *real) {
 	return rc;
 }
 
+// Programs that open files only to look at them: thumbnailers and desktop indexers. Opening an
+// online-only file downloads all of it, so a file manager drawing thumbnails for a photo folder
+// would download the whole folder (Windows never downloads online-only files for that). They are
+// refused and show a generic icon. The file manager itself may download small files, which it
+// reads to tell their type when the name does not; a large one waits until it is really opened.
+#define FILE_MANAGER_DOWNLOAD_LIMIT (1024 * 1024)
+
+static int opener_name(char *name, size_t size) {
+	struct fuse_context *ctx = fuse_get_context();
+	if (ctx == NULL || ctx->pid <= 0) {
+		return -1;
+	}
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%ld/comm", (long)ctx->pid);
+	FILE *f = fopen(path, "re");
+	if (f == NULL) {
+		return -1;
+	}
+	if (fgets(name, (int)size, f) == NULL) {
+		fclose(f);
+		return -1;
+	}
+	fclose(f);
+	name[strcspn(name, "\n")] = '\0';
+	return 0;
+}
+
+static int download_refused_for_opener(const char *real) {
+	char name[32];
+	if (opener_name(name, sizeof(name)) != 0) {
+		return 0;
+	}
+	// comm is cut to 15 characters: "glycin-thumbnai", "gsf-office-thum"
+	if (strncmp(name, "glycin", 6) == 0 || strstr(name, "thumb") != NULL
+	    || strncmp(name, "localsearch", 11) == 0 || strncmp(name, "tracker", 7) == 0) {
+		fprintf(stderr, "onedrive-ondemand: not downloading %s for %s (it only looks at files)\n", real, name);
+		return 1;
+	}
+	if (strcmp(name, "nautilus") == 0) {
+		struct stat st;
+		if (lstat(real, &st) == 0 && st.st_size > FILE_MANAGER_DOWNLOAD_LIMIT) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 // Make sure the backing file at 'real' holds its content. 0 on success, -errno on failure.
 static int ensure_hydrated(const char *real) {
 	if (!is_placeholder(real)) {
 		return 0;
+	}
+	if (download_refused_for_opener(real)) {
+		return -EIO;
 	}
 	pthread_mutex_lock(&inflight_lock);
 	want(real);
