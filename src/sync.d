@@ -210,6 +210,11 @@ class SyncEngine {
 	// which cost one API round trip per file and folder (hours on a first sync of a large
 	// drive). A drive's real identifier does not change while the client runs. Download
 	// workers save items too, hence the mutex.
+	// Fork: folder paths remembered during one database consistency walk, so an item's path
+	// is its folder's path plus its name instead of a database query per parent folder for
+	// every item (see consistencyWalkPath). Main thread only; emptied after each walk.
+	private string[string] consistencyWalkFolderPaths;
+	private bool consistencyWalkActive = false;
 	private Mutex realOnlineDriveIdMutex;
 	private string[string] realOnlineDriveIdCache;
 	// List of path names changed online, but not changed locally when using --dry-run
@@ -6561,6 +6566,13 @@ class SyncEngine {
 		// Create a new DB blank item
 		Item item;
 		bool authoritativeCleanupPassRequired = shouldPerformAuthoritativeCleanupPass();
+		// Fork: remember folder paths for the length of this walk (see consistencyWalkPath)
+		consistencyWalkActive = true;
+		scope(exit) {
+			consistencyWalkActive = false;
+			consistencyWalkFolderPaths = null;
+			version (verifyConsistencyWalkPaths) {addLogEntry("WALK PATHS checked: " ~ to!string(consistencyWalkPathsChecked) ~ ", mismatches: " ~ to!string(consistencyWalkPathMismatches));}
+		}
 		// Use the array we populate, rather than selecting all distinct driveId's from the database
 		foreach (driveId; consistencyCheckDriveIdsArray) {
 			// Make the logging more accurate - we cant update driveId as this then breaks the below queries
@@ -6753,6 +6765,39 @@ class SyncEngine {
 	}
 
 	// Check this Database Item for its consistency on disk
+	// The local path of an item checked by the consistency walk. Equal to
+	// buildNormalizedPath(computeItemPath(driveId, id)), but the parent folder's path is computed
+	// once per folder and reused for all its items. Items the path computation redirects
+	// (relocated items) and items without a parent take the full computation.
+	private string consistencyWalkPath(Item dbItem) {
+		if (consistencyWalkActive && !dbItem.parentId.empty && dbItem.relocDriveId.empty) {
+			string key = dbItem.driveId ~ "\x1f" ~ dbItem.parentId;
+			string* known = key in consistencyWalkFolderPaths;
+			string parentPath;
+			if (known !is null) {
+				parentPath = *known;
+			} else {
+				parentPath = buildNormalizedPath(computeItemPath(dbItem.driveId, dbItem.parentId));
+				consistencyWalkFolderPaths[key] = parentPath;
+			}
+			string fast = buildNormalizedPath(buildPath(parentPath, dbItem.name));
+			version (verifyConsistencyWalkPaths) {
+				string slow = buildNormalizedPath(computeItemPath(dbItem.driveId, dbItem.id));
+				if (slow != fast) {
+					consistencyWalkPathMismatches++;
+					if (consistencyWalkPathMismatches <= 5) addLogEntry("WALK PATH MISMATCH: '" ~ fast ~ "' != '" ~ slow ~ "'");
+				}
+				consistencyWalkPathsChecked++;
+			}
+			return fast;
+		}
+		return buildNormalizedPath(computeItemPath(dbItem.driveId, dbItem.id));
+	}
+	version (verifyConsistencyWalkPaths) {
+		ulong consistencyWalkPathMismatches = 0;
+		ulong consistencyWalkPathsChecked = 0;
+	}
+
 	void checkDatabaseItemForConsistency(Item dbItem) {
 		// Function Start Time
 		SysTime functionStartTime;
@@ -6788,7 +6833,7 @@ class SyncEngine {
 		}
 
 		// Compute this dbItem path early as we we use this path often
-		localFilePath = buildNormalizedPath(computeItemPath(dbItem.driveId, dbItem.id));
+		localFilePath = consistencyWalkPath(dbItem);
 
 		// A DB-known path remains protected if .nosync is added after the item was
 		// originally synchronised. Do not infer local changes/deletions beneath it.
@@ -9539,6 +9584,9 @@ class SyncEngine {
 		newLocalFilesToUploadToOneDrive = [];
 
 		// Perform a filesystem walk to uncover new data
+		// Fork: remember resolved folders while the scan looks every path up (see itemdb.d)
+		itemDB.beginPathLookupCache();
+		scope(exit) itemDB.endPathLookupCache();
 		scanLocalFilesystemPathForNewDataToUpload(path);
 
 		// Create new directories online that has been identified

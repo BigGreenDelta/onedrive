@@ -333,6 +333,12 @@ struct Statement {
 		reset();
 		return Result(pStmt);
 	}
+
+	// Fork: end the current use of a statement that is kept for reuse, so SQLite does not
+	// count it as running (VACUUM and checkpoints need none running)
+	void release() {
+		if (pStmt !is null) sqlite3_reset(pStmt);
+	}
 	
 	private void reset() {
 		// https://www.sqlite.org/c3ref/reset.html

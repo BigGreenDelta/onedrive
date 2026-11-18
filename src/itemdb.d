@@ -439,6 +439,7 @@ final class ItemDatabase {
 	
 	void closeDatabaseFile() {
 		if (databaseInitialised) {
+			releaseCachedStatements();
 			db.close();
 		}
 		databaseInitialised = false;
@@ -576,6 +577,7 @@ final class ItemDatabase {
 	
 	void insert(const ref Item item) {
 		synchronized(databaseLock) {
+			invalidatePathLookupCache();
 			auto p = db.prepare(insertItemStmt);
 			scope(exit) p.finalise(); // Ensure that the prepared statement is finalised after execution.
 			try {
@@ -589,6 +591,7 @@ final class ItemDatabase {
 
 	void update(const ref Item item) {
 		synchronized(databaseLock) {
+			invalidatePathLookupCache();
 			auto p = db.prepare(updateItemStmt);
 			scope(exit) p.finalise(); // Ensure that the prepared statement is finalised after execution.
 			try {
@@ -616,6 +619,7 @@ final class ItemDatabase {
 	// https://github.com/abraunegg/onedrive/issues/3937
 	void upsert(const ref Item item, bool skipIfUnchanged = false) {
 		synchronized(databaseLock) {
+			invalidatePathLookupCache();
 			Statement selectStmt = db.prepare("SELECT COUNT(*) FROM item WHERE driveId = ? AND id = ?");
 			Statement selectParentalStmt = db.prepare("SELECT COUNT(*) FROM item WHERE driveId = ? AND parentId = ? AND name = ?");
 			Statement executionStmt = Statement.init;  // Initialise executionStmt to avoid uninitialised variable usage
@@ -880,23 +884,124 @@ final class ItemDatabase {
 
 	// returns the item with the given path
 	// the path is relative to the sync directory ex: "./Music/file_name.mp3"
-	bool selectByPath(const(char)[] path, string rootDriveId, out Item item) {
+	// Fork: folder lookups remembered while a local scan runs (beginPathLookupCache). A local
+	// scan asks selectByPath() for every file and folder on disk, and each lookup walked the
+	// path from the root with one query per folder level: millions of queries for a large
+	// drive. With the cache a lookup resolves only what is below the deepest folder already
+	// resolved. Any write to the item table empties it, so it never answers from stale rows.
+	private bool pathLookupCacheEnabled = false;
+	private Item[string] pathLookupFolders;    // driveId \x1f "root/a/b" -> resolved folder
+	private bool[string] pathLookupMissing;    // driveId \x1f "root/a/b" -> not in the database
+	// selectByPath() runs once per local item in a scan; compiling its query each time cost a
+	// fifth of the scan. Kept compiled until performVacuum()/performCheckpoint() (they finalise
+	// every statement) or the database is closed: see releaseCachedStatements().
+	private Statement selectByPathStatement;
+	private bool selectByPathStatementReady = false;
+
+	// Callers hold databaseLock (or are closing the database)
+	private void releaseCachedStatements() {
+		if (selectByPathStatementReady) {
+			selectByPathStatement.finalise();
+			selectByPathStatementReady = false;
+		}
+	}
+
+	void beginPathLookupCache() {
+		synchronized(databaseLock) {
+			pathLookupCacheEnabled = true;
+			pathLookupFolders = null;
+			pathLookupMissing = null;
+		}
+	}
+
+	void endPathLookupCache() {
+		version (verifyPathLookupCache) {reportPathLookupCheck();}
+		synchronized(databaseLock) {
+			pathLookupCacheEnabled = false;
+			pathLookupFolders = null;
+			pathLookupMissing = null;
+		}
+	}
+
+	// Callers hold databaseLock
+	private void invalidatePathLookupCache() {
+		pathLookupFolders = null;
+		pathLookupMissing = null;
+	}
+
+	version (verifyPathLookupCache) {
+		ulong pathLookupChecked = 0, pathLookupMismatches = 0;
+		bool selectByPath(const(char)[] path, string rootDriveId, out Item item) {
+			synchronized(databaseLock) {
+				Item cached;
+				bool a = selectByPathCached(path, rootDriveId, cached);
+				if (pathLookupCacheEnabled) {
+					pathLookupCacheEnabled = false;
+					Item plain;
+					bool b = selectByPathCached(path, rootDriveId, plain);
+					pathLookupCacheEnabled = true;
+					pathLookupChecked++;
+					if (a != b || (a && (cached.id != plain.id || cached.driveId != plain.driveId))) {
+						pathLookupMismatches++;
+						if (pathLookupMismatches <= 5) addLogEntry("LOOKUP MISMATCH: " ~ path.idup);
+					}
+				}
+				item = cached;
+				return a;
+			}
+		}
+		void reportPathLookupCheck() { addLogEntry("LOOKUPS checked: " ~ to!string(pathLookupChecked) ~ ", mismatches: " ~ to!string(pathLookupMismatches)); }
+	} else {
+		bool selectByPath(const(char)[] path, string rootDriveId, out Item item) {
+			return selectByPathCached(path, rootDriveId, item);
+		}
+	}
+
+	private bool selectByPathCached(const(char)[] path, string rootDriveId, out Item item) {
 		synchronized(databaseLock) {
 			Item currItem = { driveId: rootDriveId };
 			
 			// Issue https://github.com/abraunegg/onedrive/issues/578
 			path = "root/" ~ (startsWith(path, "./") || path == "." ? path.chompPrefix(".") : path);
 			
-			auto s = db.prepare("SELECT * FROM item WHERE name = ?1 AND driveId IS ?2 AND parentId IS ?3");
-			scope(exit) s.finalise(); // Ensure that the prepared statement is finalised after execution.
+			if (!selectByPathStatementReady) {
+				selectByPathStatement = db.prepare("SELECT * FROM item WHERE name = ?1 AND driveId IS ?2 AND parentId IS ?3");
+				selectByPathStatementReady = true;
+			}
+			Statement* s = &selectByPathStatement;
+			scope(exit) selectByPathStatement.release(); // Ends this use; the statement stays compiled
 
 			try {
-				foreach (name; pathSplitter(path)) {
+				string[] names;
+				foreach (name; pathSplitter(path)) names ~= name.idup;
+				size_t start = 0;
+				string prefix;
+				if (pathLookupCacheEnabled && names.length > 1) {
+					// Start below the deepest folder of this path that is already resolved
+					string candidate;
+					foreach (i; 0 .. names.length - 1) {
+						candidate = (i == 0) ? names[0] : candidate ~ "/" ~ names[i];
+						string key = rootDriveId ~ "\x1f" ~ candidate;
+						if (key in pathLookupMissing) return false;
+						Item* known = key in pathLookupFolders;
+						if (known is null) break;
+						currItem = *known;
+						start = i + 1;
+						prefix = candidate;
+					}
+				}
+				foreach (index; start .. names.length) {
+					string name = names[index];
+					prefix = (index == 0) ? name : prefix ~ "/" ~ name;
+					bool isFolderStep = index + 1 < names.length;
 					s.bind(1, name);
 					s.bind(2, currItem.driveId);
 					s.bind(3, currItem.id);
 					auto r = s.exec();
-					if (r.empty) return false;
+					if (r.empty) {
+						if (pathLookupCacheEnabled && isFolderStep) pathLookupMissing[rootDriveId ~ "\x1f" ~ prefix] = true;
+						return false;
+					}
 					currItem = buildItem(r);
 					
 					// If the item is of type remote, substitute it with the child
@@ -909,6 +1014,7 @@ final class ItemDatabase {
 							if (debugLogging) {addLogEntry("Selecting Record that is NOT Remote Object: " ~ to!string(currItem), ["debug"]);}
 						}
 					}
+					if (pathLookupCacheEnabled && isFolderStep) pathLookupFolders[rootDriveId ~ "\x1f" ~ prefix] = currItem;
 				}
 				item = currItem;
 				return true;
@@ -957,6 +1063,7 @@ final class ItemDatabase {
 
 	void deleteById(const(char)[] driveId, const(char)[] id) {
 		synchronized(databaseLock) {
+			invalidatePathLookupCache();
 			auto p = db.prepare(deleteItemByIdStmt);
 			scope(exit) p.finalise(); // Ensure that the prepared statement is finalised after execution.
 			try {
@@ -1462,6 +1569,7 @@ final class ItemDatabase {
 	// Perform a vacuum on the database, commit WAL / SHM to file
 	void performVacuum() {
 		synchronized(databaseLock) {
+			releaseCachedStatements();
 			// Log what we are attempting to do
 			addLogEntry("Attempting to perform a database vacuum to optimise database");
 			
@@ -1503,6 +1611,7 @@ final class ItemDatabase {
 	// Perform a checkpoint (either TRUNCATE or PASSIVE) by writing the data into to the database from the WAL file
 	void performCheckpoint(string checkpointType) {
 		synchronized(databaseLock) {
+			releaseCachedStatements();
 			// Log what we are attempting to do
 			if (debugLogging) {addLogEntry("Attempting to perform a database checkpoint to merge temporary data", ["debug"]);}
 			

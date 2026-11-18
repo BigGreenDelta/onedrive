@@ -32,6 +32,9 @@ import clientSideFiltering;
 // these markers through their inotify implementation.
 private immutable uint32_t mask = IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MOVE | IN_IGNORED | IN_Q_OVERFLOW;
 
+// Fork: folders whose inotify watch could not be added (their changes go unreported)
+__gshared ulong inotifyWatchFailures = 0;
+
 // FreeBSD and OpenBSD inotify compatibility layers may emit IN_CREATE without
 // a later IN_CLOSE_WRITE when a newly written file is closed. Treat that file
 // creation as the actionable change on those platforms. Linux continues to use
@@ -102,6 +105,9 @@ class MonitorBackgroundWorker {
 	shared int addInotifyWatch(string pathname) {
 		int wd = inotify_add_watch(fd, toStringz(pathname), mask);
 		if (wd < 0) {
+			// Fork: a folder without a watch reports nothing, so --monitor keeps its full local
+			// passes on every cycle (see fullLocalPassDue() in main.d)
+			inotifyWatchFailures++;
 			if (errno() == ENOSPC) {
 				// Predefined Versions
 				// https://dlang.org/spec/version.html#predefined-versions

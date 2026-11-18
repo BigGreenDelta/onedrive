@@ -691,6 +691,9 @@ _**Config Example:**_ `monitor_fullscan_frequency = "24"`
 _**CLI Option Use:**_ `--monitor-fullscan-frequency '24'`
 
 > [!NOTE]
+> Fork behaviour: the same cadence decides when `--monitor` runs its two full local passes, the database consistency check and the scan of `sync_dir` for new local data. They read every item and folder (over a minute for a drive with 650,000 items), and while inotify watches every folder they only find what inotify did not report. So they run on the first cycle, on every full-scan cycle, after an inotify error or queue overflow, and on every cycle while a folder could not be watched; other cycles rely on inotify. `--sync`, `--download-only` and `--resync` always run them.
+
+> [!NOTE]
 > This option controls the online full-scan true-up cadence. An online full-scan true-up is when the client deliberately does not use the stored Microsoft Graph `/delta` link for that pass and instead performs a broader online reconciliation pass to ensure local and online state remain consistent. 
 >
 > By default, `monitor_fullscan_frequency` is set to `12`. With the default `monitor_interval` value of `300` seconds, this means an online full-scan true-up is scheduled approximately every:

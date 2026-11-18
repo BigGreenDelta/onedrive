@@ -2384,6 +2384,22 @@ void performUploadOnlySyncProcess(string localPath, Monitor filesystemMonitor = 
 }
 
 // Perform the normal application sync process
+// Fork: with inotify watching every folder, a --monitor cycle skips the two full local passes
+// (the database consistency walk and the scan for new local data). Together they read every
+// item and folder - over a minute for 650k items - and only find what inotify did not report.
+// They still run on the first cycle, on every full-scan cycle (monitor_fullscan_frequency),
+// after an inotify error or queue overflow, and on every cycle while a watch is missing.
+bool monitorFullLocalPassRequired = true;
+
+bool fullLocalPassDue(Monitor monitorInUse) {
+	if (!appConfig.getValueBool("monitor")) return true;
+	if (monitorInUse is null || !monitorInUse.initialised) return true;
+	if (appConfig.getValueBool("resync") || appConfig.getValueBool("download_only")) return true;
+	if (monitorFullLocalPassRequired || appConfig.fullScanTrueUpRequired) return true;
+	if (inotifyWatchFailures > 0) return true;
+	return false;
+}
+
 void performStandardSyncProcess(string localPath, Monitor filesystemMonitor = null) {
 	if (!systemTimeAllowsSyncContinuation("standard_sync.start")) return;
 
@@ -2447,8 +2463,14 @@ void performStandardSyncProcess(string localPath, Monitor filesystemMonitor = nu
 		
 		if (!systemTimeAllowsSyncContinuation("standard_sync.remote_first.pre_database_scan")) return;
 
+		// Fork: decide once per cycle (see fullLocalPassDue)
+		bool fullLocalPass = fullLocalPassDue(filesystemMonitor !is null ? filesystemMonitor : .filesystemMonitor);
+		if (!fullLocalPass && debugLogging) {addLogEntry("Skipping the full local passes this cycle: inotify reports local changes", ["debug"]);}
+
 		// Perform the local database consistency check, picking up locally modified data and uploading this to OneDrive
-		syncEngineInstance.performDatabaseConsistencyAndIntegrityCheck();
+		if (fullLocalPass) {
+			syncEngineInstance.performDatabaseConsistencyAndIntegrityCheck();
+		}
 		if (appConfig.getValueBool("monitor")) {
 			// Handle any inotify events whilst the DB was being scanned
 			captureAndApplyInotifyEvents("standard_sync.remote_first.post_database_scan");
@@ -2460,7 +2482,11 @@ void performStandardSyncProcess(string localPath, Monitor filesystemMonitor = nu
 			if (!systemTimeAllowsSyncContinuation("standard_sync.remote_first.pre_local_scan")) return;
 
 			// Scan the configured 'sync_dir' for new data to upload to OneDrive
-			syncEngineInstance.scanLocalFilesystemPathForNewData(localPath);
+			if (fullLocalPass) {
+				syncEngineInstance.scanLocalFilesystemPathForNewData(localPath);
+				// Both passes done: later cycles may rely on inotify again
+				monitorFullLocalPassRequired = false;
+			}
 			if (appConfig.getValueBool("monitor")) {
 				// Handle any new inotify events whilst the local filesystem was being scanned
 				captureAndApplyInotifyEvents("standard_sync.remote_first.post_local_scan");
@@ -2533,6 +2559,8 @@ void captureInotifyEvents(string invocationSource) {
 		filesystemMonitor.capture(invocationSource, logKey);
 	} catch (MonitorException e) {
 		addLogEntry("ERROR: The following inotify error was generated: " ~ e.msg);
+		// Fork: events may be lost (queue overflow): the next cycle walks everything again
+		monitorFullLocalPassRequired = true;
 	}
 
 	if (appConfig.getValueBool("display_processing_time") && debugLogging) {
