@@ -331,6 +331,20 @@ bool hasHydratedMarker(string path) {
 	}
 }
 
+// The online item id recorded when the file was downloaded for Files On-Demand ("" if none)
+string hydratedMarkerItemId(string path) {
+	version (linux) {
+		string value;
+		if (!readXattr(path, hydratedXattrName, value)) {
+			return "";
+		}
+		auto parts = value.split("\n");
+		return parts.length >= 1 ? parts[0] : "";
+	} else {
+		return "";
+	}
+}
+
 // Forget the hydrated marker (the file is being uploaded, so it is local content now)
 void clearHydratedMarker(string path) {
 	version (linux) {

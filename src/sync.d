@@ -20058,6 +20058,23 @@ class SyncEngine {
 		try {
 			onlineItem = api.getPathDetails(relativePath(path, syncBase));
 		} catch (OneDriveException exception) {
+			// Fork: a file in a folder shared from another drive is not under this drive's root, so
+			// the path is unknown online. Look it up by the item recorded when it was downloaded;
+			// on a Personal account the part of an item id before '!' is its drive id.
+			if (exception.httpStatusCode == 404) {
+				string markedItemId = hydratedMarkerItemId(path);
+				auto bang = markedItemId.indexOf('!');
+				if (bang > 0) {
+					try {
+						onlineItem = api.getPathDetailsById(transformToLowerCase(markedItemId[0 .. bang]), markedItemId);
+					} catch (OneDriveException byIdException) {
+						onlineItem = JSONValue.init;
+					}
+				}
+			}
+			if (onlineItem.type() == JSONType.object) {
+				goto haveOnlineItem;
+			}
 			if (exception.httpStatusCode == 404) {
 				addLogEntry("Skipping " ~ path ~ ": it does not exist online (not uploaded yet?)");
 			} else {
@@ -20065,6 +20082,7 @@ class SyncEngine {
 			}
 			return false;
 		}
+		haveOnlineItem:
 		if (onlineItem.type() != JSONType.object || !isFileItem(onlineItem)) {
 			addLogEntry("Skipping " ~ path ~ ": the online item is not a file");
 			return false;
