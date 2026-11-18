@@ -115,7 +115,8 @@ Turning `files_on_demand` on never removes content: files that are already on th
 ## Limits
 
 - Use your files through `on_demand_mount_dir`. Reading a placeholder directly in `sync_dir` returns zeros, because a placeholder has no content.
-- Opening a placeholder without network access fails with "Input/output error". For 30 seconds after a failed download, opening the same file fails at once instead of retrying. Files that are already on this device keep working offline.
+- Opening a placeholder without network access fails. When a download receives no new data for `on_demand_stall_timeout` seconds (default 60), it is stopped and the open fails with "Connection timed out"; other download failures give "Input/output error". The limit is on progress, not on total time, so a large file on a slow connection is never stopped while data keeps arriving. Opening a stopped large file (4 MiB or more) again resumes where the download stopped.
+- For 30 seconds after a failed download, opening the same file fails at once ("Input/output error") instead of retrying. Files that are already on this device keep working offline.
 - Opening a placeholder for writing (including `touch`) downloads it first. Changing a placeholder's mode or time without opening it is ignored, and hard links to placeholders are refused.
 - At most 4 placeholders download at once through the mount; further opens wait for a free slot.
 - `--download-now`, `--free-up-space` and `--mount-on-demand` do not support `--dry-run`.

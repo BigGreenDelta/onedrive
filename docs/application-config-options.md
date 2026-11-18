@@ -52,6 +52,7 @@ Before reading this document, please ensure you are running application version 
   - [no_remote_delete](#no_remote_delete)
   - [notify_file_actions](#notify_file_actions)
   - [on_demand_mount_dir](#on_demand_mount_dir)
+  - [on_demand_stall_timeout](#on_demand_stall_timeout)
   - [notify_monitor_start](#notify_monitor_start)
   - [operation_timeout](#operation_timeout)
   - [permanent_delete](#permanent_delete)
@@ -868,6 +869,17 @@ _**CLI Option Use:**_ *None - this is a config file option only*
 
 > [!IMPORTANT]
 > 'on_demand_mount_dir' and 'sync_dir' must not contain one another.
+
+### on_demand_stall_timeout
+_**Description:**_ Fork feature. When a download started by opening a placeholder through `--mount-on-demand` receives no new data for this many seconds, the download is stopped and the open fails with "Connection timed out". The limit is on progress, not on total time: a large file on a slow connection is never stopped while data keeps arriving. Opening a large file again resumes the download where it stopped. See [Files On-Demand](files-on-demand.md).
+
+_**Value Type:**_ Integer (seconds, minimum 10)
+
+_**Default Value:**_ 60
+
+_**Config Example:**_ `on_demand_stall_timeout = "60"`
+
+_**CLI Option Use:**_ *None - this is a config file option only*
 
 ### notify_monitor_start
 _**Description:**_ This configuration option controls whether the client sends a concise GUI notification when `--monitor` mode becomes active. The notification summarises the local and remote monitoring mechanisms applicable to the current configuration. Disabling this option suppresses only the monitor-start GUI notification; console startup status logging and all other GUI notifications are unaffected.

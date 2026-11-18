@@ -421,8 +421,12 @@ string[string] collectPlaceholderItemIds(string root) {
 // --mount-on-demand: expose the sync directory through the FUSE bridge (src/fusebridge.c)
 // ---------------------------------------------------------------------------------
 
+// A download through the mount that makes no progress for 'on_demand_stall_timeout'
+// seconds is stopped. Shorter limits would stop healthy downloads during a retry backoff.
+immutable long minimumOnDemandStallTimeout = 10;
+
 version (OnDemandFuse) {
-	extern (C) int onedrive_fuse_mount(const(char)* backingRoot, const(char)* mountPoint, const(char)* hydrateExe, const(char)* confDir, int debugOutput);
+	extern (C) int onedrive_fuse_mount(const(char)* backingRoot, const(char)* mountPoint, const(char)* hydrateExe, const(char)* confDir, int stallTimeout, int debugOutput);
 }
 
 int runOnDemandMount(ApplicationConfig appConfig, string syncDir, string confdirOption) {
@@ -449,10 +453,15 @@ int runOnDemandMount(ApplicationConfig appConfig, string syncDir, string confdir
 		mkdirRecurse(mountPoint);
 	}
 	string confDir = buildNormalizedPath(absolutePath(appConfig.configDirName));
+	long stallTimeout = appConfig.getValueLong("on_demand_stall_timeout");
+	if (stallTimeout < minimumOnDemandStallTimeout || stallTimeout > int.max) {
+		addLogEntry("WARNING: 'on_demand_stall_timeout' must be at least " ~ to!string(minimumOnDemandStallTimeout) ~ " seconds; using " ~ to!string(minimumOnDemandStallTimeout));
+		stallTimeout = minimumOnDemandStallTimeout;
+	}
 
 	version (OnDemandFuse) {
 		addLogEntry("Files On-Demand mount: " ~ mountPoint ~ " -> " ~ backing ~ " (unmount with: fusermount3 -u " ~ mountPoint ~ ")");
-		int rc = onedrive_fuse_mount(toStringz(backing), toStringz(mountPoint), toStringz(thisExePath()), toStringz(confDir), debugLogging ? 1 : 0);
+		int rc = onedrive_fuse_mount(toStringz(backing), toStringz(mountPoint), toStringz(thisExePath()), toStringz(confDir), cast(int) stallTimeout, debugLogging ? 1 : 0);
 		return rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 	} else {
 		addLogEntry("ERROR: This build has no Files On-Demand mount support. Rebuild with: ./configure --enable-fuse (needs libfuse3).");

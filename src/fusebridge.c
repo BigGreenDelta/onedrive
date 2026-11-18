@@ -35,6 +35,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <signal.h>
 #include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
@@ -59,6 +60,9 @@ static char conf_dir[PATH_MAX];
 // After a download fails, opens of the same file fail at once for this long instead of
 // each waiting application retrying the full download (for example while offline).
 #define FAILURE_MEMORY_SECONDS 30
+// A download that makes no progress for this many seconds is stopped and the open fails
+// with ETIMEDOUT. Set from 'on_demand_stall_timeout'.
+static int stall_timeout_seconds = 60;
 
 // Build the backing path for a FUSE path ("/a/b" -> "<backing_root>/a/b")
 static int backing_path(char out[PATH_MAX], const char *path) {
@@ -134,6 +138,40 @@ static int inflight_contains(const char *real) {
 	return 0;
 }
 
+static double monotonic_seconds(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+// Stop a download that stopped making progress: ask first (the client then removes its
+// private database), force it after a grace period. A forced stop leaves the '.partial'
+// file in place, so the next open of a large file resumes from it instead of starting over.
+static void stop_hydrator(pid_t pid) {
+	int status;
+	kill(pid, SIGTERM);
+	double deadline = monotonic_seconds() + 5.0;
+	while (monotonic_seconds() < deadline) {
+		if (waitpid(pid, &status, WNOHANG) == pid) {
+			return;
+		}
+		struct timespec tick = {0, 100 * 1000 * 1000};
+		nanosleep(&tick, NULL);
+	}
+	kill(pid, SIGKILL);
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+	}
+	// A killed client cannot clean up its per-process database: remove it here
+	static const char *suffixes[] = {"", "-wal", "-shm", "-journal"};
+	for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+		char db[PATH_MAX + 64];
+		int n = snprintf(db, sizeof(db), "%s/items-ondemand-%ld.sqlite3%s", conf_dir, (long)pid, suffixes[i]);
+		if (n > 0 && (size_t)n < sizeof(db)) {
+			unlink(db);
+		}
+	}
+}
+
 static int run_hydrator(const char *real) {
 	char *argv[] = {hydrate_exe, "--confdir", conf_dir, "--download-now", (char *)real, NULL};
 	pid_t pid;
@@ -148,11 +186,36 @@ static int run_hydrator(const char *real) {
 		fprintf(stderr, "onedrive-ondemand: cannot start %s: %s\n", hydrate_exe, strerror(rc));
 		return -EIO;
 	}
+	// Watch the download instead of waiting blindly: the client retries a lost connection
+	// for up to a year, and the application that opened the file waits as long as we do.
+	// The limit is on progress, not on total time: a large file on a slow but working
+	// connection keeps growing its '.partial' file and is never stopped.
+	char partial[PATH_MAX + 16];
+	snprintf(partial, sizeof(partial), "%s.partial", real);
+	off_t last_size = -2;
+	double last_progress = monotonic_seconds();
 	int status = 0;
-	while (waitpid(pid, &status, 0) < 0) {
-		if (errno != EINTR) {
+	for (;;) {
+		pid_t done = waitpid(pid, &status, WNOHANG);
+		if (done == pid) {
+			break;
+		}
+		if (done < 0 && errno != EINTR) {
 			return -EIO;
 		}
+		struct stat st;
+		off_t size = (lstat(partial, &st) == 0) ? st.st_size : -1;
+		double now = monotonic_seconds();
+		if (size != last_size) {
+			last_size = size;
+			last_progress = now;
+		} else if (now - last_progress >= stall_timeout_seconds) {
+			fprintf(stderr, "onedrive-ondemand: no download progress for %d seconds, stopping the download of %s\n", stall_timeout_seconds, real);
+			stop_hydrator(pid);
+			return -ETIMEDOUT;
+		}
+		struct timespec tick = {0, 250 * 1000 * 1000};
+		nanosleep(&tick, NULL);
 	}
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
 		fprintf(stderr, "onedrive-ondemand: download failed for %s\n", real);
@@ -569,8 +632,9 @@ static const struct fuse_operations od_operations = {
 };
 
 // Entry point called from src/ondemand.d. Runs in the foreground until unmounted.
-int onedrive_fuse_mount(const char *backing, const char *mountpoint, const char *exe, const char *confdir, int debug) {
+int onedrive_fuse_mount(const char *backing, const char *mountpoint, const char *exe, const char *confdir, int stall_timeout, int debug) {
 	snprintf(backing_root, sizeof(backing_root), "%s", backing);
+	stall_timeout_seconds = stall_timeout;
 	// ONEDRIVE_ONDEMAND_HYDRATOR replaces the download command (same arguments). It exists for
 	// tests of the mount that must run without a OneDrive account.
 	const char *hydrator_override = getenv("ONEDRIVE_ONDEMAND_HYDRATOR");

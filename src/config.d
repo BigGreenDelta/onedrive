@@ -415,6 +415,8 @@ class ApplicationConfig {
 		boolValues["files_on_demand"] = false;
 		// Files On-Demand: where '--mount-on-demand' exposes the sync directory (opening a placeholder there downloads it)
 		stringValues["on_demand_mount_dir"] = "";
+		// Files On-Demand: a download through the mount that makes no progress for this many seconds is stopped
+		longValues["on_demand_stall_timeout"] = 60;
 		// Publish machine-readable monitor runtime status to <confdir>/monitor-status.json
 		// Enabled by default so monitor observability is available without additional configuration.
 		boolValues["monitor_status"] = true;
@@ -1831,6 +1833,7 @@ class ApplicationConfig {
 		addLogEntry("Config option 'download_only'                 = " ~ to!string(getValueBool("download_only")));
 		addLogEntry("Config option 'files_on_demand'               = " ~ to!string(getValueBool("files_on_demand")));
 		addLogEntry("Config option 'on_demand_mount_dir'           = " ~ getValueString("on_demand_mount_dir"));
+		addLogEntry("Config option 'on_demand_stall_timeout'       = " ~ to!string(getValueLong("on_demand_stall_timeout")));
 		addLogEntry("Files On-Demand 'pin_list' configured         = " ~ to!string(exists(pinListFilePath)));
 		addLogEntry("Config option 'local_first'                   = " ~ to!string(getValueBool("local_first")));
 		addLogEntry("Config option 'mirror_local_state'            = " ~ to!string(getValueBool("mirror_local_state")));
