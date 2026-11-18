@@ -362,17 +362,15 @@ static int hydrate_locked(const char *real) {
 // Programs that open files only to look at them: thumbnailers and desktop indexers. Opening an
 // online-only file downloads all of it, so a file manager drawing thumbnails for a photo folder
 // would download the whole folder (Windows never downloads online-only files for that). They are
-// refused and show a generic icon. The file manager itself may download small files, which it
-// reads to tell their type when the name does not; a large one waits until it is really opened.
-#define FILE_MANAGER_DOWNLOAD_LIMIT (1024 * 1024)
+// refused and show a generic icon. The file manager itself reads files only to tell their type,
+// one after another, and each download costs seconds (a client process per file), so it is
+// refused too: an online-only file downloads when it is opened from the file manager, which
+// starts the application that reads it.
 
-static int opener_name(char *name, size_t size) {
-	struct fuse_context *ctx = fuse_get_context();
-	if (ctx == NULL || ctx->pid <= 0) {
-		return -1;
-	}
+// Read /proc/<id>/comm into 'name'
+static int read_comm(long id, char *name, size_t size) {
 	char path[64];
-	snprintf(path, sizeof(path), "/proc/%ld/comm", (long)ctx->pid);
+	snprintf(path, sizeof(path), "/proc/%ld/comm", id);
 	FILE *f = fopen(path, "re");
 	if (f == NULL) {
 		return -1;
@@ -386,23 +384,53 @@ static int opener_name(char *name, size_t size) {
 	return 0;
 }
 
+// The opener's thread name and its process name. FUSE reports the calling thread, and
+// worker threads have their own names ("pool-org.gnome."), so both are needed.
+static int opener_names(char *thread_name, char *process_name, size_t size) {
+	struct fuse_context *ctx = fuse_get_context();
+	thread_name[0] = process_name[0] = '\0';
+	if (ctx == NULL || ctx->pid <= 0) {
+		return -1;
+	}
+	read_comm((long)ctx->pid, thread_name, size);
+	long tgid = (long)ctx->pid;
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%ld/status", (long)ctx->pid);
+	FILE *f = fopen(path, "re");
+	if (f != NULL) {
+		char line[256];
+		while (fgets(line, sizeof(line), f) != NULL) {
+			if (strncmp(line, "Tgid:", 5) == 0) {
+				tgid = strtol(line + 5, NULL, 10);
+				break;
+			}
+		}
+		fclose(f);
+	}
+	read_comm(tgid, process_name, size);
+	return 0;
+}
+
+static int looks_only(const char *name) {
+	// comm is cut to 15 characters: "glycin-thumbnai", "gsf-office-thum"
+	return strncmp(name, "glycin", 6) == 0 || strstr(name, "thumb") != NULL
+	    || strncmp(name, "localsearch", 11) == 0 || strncmp(name, "tracker", 7) == 0;
+}
+
 static int download_refused_for_opener(const char *real) {
-	char name[32];
-	if (opener_name(name, sizeof(name)) != 0) {
+	char thread_name[32], process_name[32];
+	if (opener_names(thread_name, process_name, sizeof(thread_name)) != 0) {
 		return 0;
 	}
-	// comm is cut to 15 characters: "glycin-thumbnai", "gsf-office-thum"
-	if (strncmp(name, "glycin", 6) == 0 || strstr(name, "thumb") != NULL
-	    || strncmp(name, "localsearch", 11) == 0 || strncmp(name, "tracker", 7) == 0) {
-		fprintf(stderr, "onedrive-ondemand: not downloading %s for %s (it only looks at files)\n", real, name);
+	if (looks_only(process_name) || looks_only(thread_name)) {
+		fprintf(stderr, "onedrive-ondemand: not downloading %s for %s/%s (it only looks at files)\n", real, process_name, thread_name);
 		return 1;
 	}
-	if (strcmp(name, "nautilus") == 0) {
-		struct stat st;
-		if (lstat(real, &st) == 0 && st.st_size > FILE_MANAGER_DOWNLOAD_LIMIT) {
-			return 1;
-		}
+	if (strcmp(process_name, "nautilus") == 0) {
+		fprintf(stderr, "onedrive-ondemand: not downloading %s for the file manager (it downloads when opened)\n", real);
+		return 1;
 	}
+	fprintf(stderr, "onedrive-ondemand: downloading %s for %s/%s\n", real, process_name, thread_name);
 	return 0;
 }
 

@@ -104,7 +104,7 @@ WantedBy=default.target
 Opening an online-only file downloads it, but a file manager opens files only to look at them: to draw thumbnails and to tell a file's type. The mount refuses those reads so browsing a folder never downloads it, like Windows:
 
 - thumbnailers (`glycin…`, any program with `thumb` in its name) and desktop indexers (`localsearch`, `tracker…`) get "Input/output error" for an online-only file, and show a generic icon;
-- the file manager itself (`nautilus`) may download files up to 1 MiB, which it reads to tell their type when the name does not;
+- the file manager itself (`nautilus`) is refused too: it reads files only to tell their type, one after another, and each download takes seconds;
 - every other program, and any file you open from the file manager, downloads as usual.
 
 ## Free up space automatically
